@@ -156,15 +156,27 @@
   .edit .bar { flex-wrap:wrap; gap:8px; }
   .edit .bar select { flex:none; width:auto; margin-left:auto; }
   .edit .bar input[type=text] { width:140px; }
-  .clips { display:flex; gap:8px; overflow-x:auto; min-height:94px; padding:8px; background:#0f0f0f; border:1px solid var(--line); border-radius:8px; }
-  .clips:empty::before { content:"Set In and Out in step 1, grade the shot, then click Add clip."; margin:auto; color:var(--dim); font-size:12px; }
-  .clip { flex:none; width:104px; }
-  .clip .thumb { display:block; width:100%; height:56px; padding:0; border:1px solid var(--line); border-radius:6px; overflow:hidden; background:#0b0b0b; }
-  .clip.sel .thumb { border-color:#ececec; box-shadow:0 0 0 1px #ececec; }
-  .clip .thumb img { display:block; width:100%; height:100%; object-fit:cover; }
-  .clip div { display:flex; align-items:center; font-size:11px; color:var(--dim); margin-top:2px; }
-  .clip div span { margin-right:auto; font-variant-numeric:tabular-nums; }
-  .clip.sel div span { color:var(--hi); }
+  .clips { position:relative; overflow-x:auto; min-height:104px; padding:0 8px 8px; background:#0f0f0f; border:1px solid var(--line); border-radius:8px; }
+  .clips.none .lane { display:none; }
+  .clips.none::before { content:"Set In and Out in step 1, grade the shot, then click Add clip."; display:block; padding-top:42px; text-align:center;
+                        color:var(--dim); font-size:12px; }
+  .lane { position:relative; min-width:100%; }
+  .ruler { position:relative; height:24px; cursor:pointer; touch-action:none; border-bottom:1px solid var(--line); }
+  .ruler span { position:absolute; bottom:0; height:16px; padding-left:4px; border-left:1px solid #4a4a4a; font-size:10px; line-height:12px; color:var(--dim);
+                font-variant-numeric:tabular-nums; pointer-events:none; }
+  .track { position:relative; height:58px; margin-top:8px; }
+  .block { position:absolute; top:0; height:100%; padding:0; border:1px solid var(--line); border-radius:5px; overflow:hidden;
+           background:#1c1c1c left / auto 100% repeat-x; }
+  .block.sel { border-color:#ececec; box-shadow:0 0 0 1px #ececec; }
+  .block span { position:absolute; left:3px; bottom:3px; padding:0 4px; border-radius:3px; background:#000b; color:#eee; font-size:10px; white-space:nowrap;
+                font-variant-numeric:tabular-nums; }
+  .lane .head { position:absolute; top:0; bottom:0; left:var(--at, 0px); width:2px; margin-left:-1px; background:#fff; box-shadow:0 0 0 1px #000a;
+                pointer-events:none; }
+  .viewer.timeline canvas { display:block; }
+  .viewer:not(.timeline) #tl-tag { display:none; }
+  .viewer.timeline #tl-tag { display:block; }
+  .viewer.timeline img, .viewer.timeline .handle, .viewer.timeline .tag:not(#tl-tag), .viewer.timeline .close, .viewer.timeline .empty { display:none !important; }
+  .viewer.timeline { cursor:default; }
 
   @media (max-width:720px) {
     .app { grid-template-columns:1fr; height:auto; }
@@ -230,8 +242,8 @@
     </div>
     <div class="viewer" id="viewer" data-mode="split">
       <img id="graded" alt="Graded frame"><img id="orig" alt="Original frame">
-      <video id="video" playsinline preload="auto"></video><canvas id="stage" aria-label="Video preview"></canvas>
-      <div class="handle"></div><span class="tag l">Original</span><span class="tag r">Graded</span>
+      <video id="video" playsinline preload="auto"></video><video id="tvideo" playsinline preload="auto"></video><video id="tvideo2" playsinline preload="auto"></video><canvas id="stage" aria-label="Video preview"></canvas>
+      <div class="handle"></div><span class="tag l">Original</span><span class="tag r">Graded</span><span class="tag l" id="tl-tag">Timeline</span>
       <div class="close" id="closeup"><div><img id="close-before" alt="Close-up without denoise"><span>Without denoise</span></div><div><img id="close-after" alt="Close-up with denoise"><span>With denoise</span></div></div>
       <div class="empty"><b>Load a video to start</b><span>Paste a path or click Browse in step 1.</span></div>
     </div>
@@ -253,11 +265,14 @@
     <div class="edit">
       <div class="bar">
         <span class="title">Timeline</span><span class="note" id="clips-note"></span>
+        <button id="tl-play" disabled title="Play the assembled clips">Play timeline</button><span class="time" id="tl-time">0:00.0 / 0:00.0</span>
         <button id="clip-add">Add clip</button><button id="clip-update" hidden>Update selected</button>
+        <span id="clip-tools" hidden><button class="quiet" id="clip-earlier" title="Move the selected clip earlier">‹</button><button class="quiet" id="clip-later" title="Move the selected clip later">›</button><button class="quiet" id="clip-remove" title="Remove the selected clip">×</button></span>
+        <label>Zoom</label><button id="tl-zoom-out" aria-label="Zoom the timeline out">−</button><button id="tl-zoom-in" aria-label="Zoom the timeline in">+</button>
         <select id="export-size" aria-label="Export size"><option value="full">Original size</option><option value="hd">1080p</option></select>
         <input type="text" id="export-name" value="my video" aria-label="Export file name"><button class="primary" id="export">Export video</button>
       </div>
-      <div class="clips" id="clips"></div>
+      <div class="clips none" id="clips"><div class="lane" id="lane"><div class="ruler" id="ruler" title="Click or drag to move along the timeline"></div><div class="track" id="track"></div><div class="head"></div></div></div>
       <div class="status" id="export-status"></div>
     </div>
   </main>
@@ -338,7 +353,7 @@ const drag = e => {
   viewer.style.setProperty("--split", Math.min(100, Math.max(0, (e.clientX - r.left) / r.width * 100)) + "%");
   draw();
 };
-viewer.addEventListener("pointerdown", e => { if (viewer.dataset.mode === "split") { viewer.setPointerCapture(e.pointerId); drag(e); } });
+viewer.addEventListener("pointerdown", e => { if (viewer.dataset.mode === "split" && !tl.on) { viewer.setPointerCapture(e.pointerId); drag(e); } });
 viewer.addEventListener("pointermove", e => { if (viewer.hasPointerCapture(e.pointerId)) drag(e); });
 viewer.addEventListener("pointerup", persist);
 
@@ -453,17 +468,18 @@ if (gl) {
 }
 const inVideo = () => viewer.classList.contains("video");
 function draw() {
-  if (!inVideo() || video.readyState < 2) return;
+  const video = tl.on ? tvideo : $("video");  // the timeline plays in a player of its own
+  if (!(tl.on || inVideo()) || video.readyState < 2) return;
   const w = Math.min(video.videoWidth, 1920), h = Math.round(w * video.videoHeight / video.videoWidth);
   if (stage.width !== w || stage.height !== h) { stage.width = w; stage.height = h; gl.viewport(0, 0, w, h); }
-  let split = viewer.dataset.mode === "graded" ? -1 : 2;
-  if (viewer.dataset.mode === "split") {  // the wipe is a share of the viewer; the picture is letterboxed inside it
+  let split = tl.on || viewer.dataset.mode === "graded" ? -1 : 2;
+  if (viewer.dataset.mode === "split" && !tl.on) {  // the wipe is a share of the viewer; the picture is letterboxed inside it
     const r = viewer.getBoundingClientRect(), shown = w * Math.min(r.width / w, r.height / h);
     split = (parseFloat(viewer.style.getPropertyValue("--split") || "50") / 100 * r.width - (r.width - shown) / 2) / shown;
   }
   gl.uniform1f(uniform.split, split);
-  gl.uniform1f(uniform.grain, v("grain"));
-  gl.uniform1f(uniform.cell, v("grainsize") * h / 1080);  // grain size is set for a 1080p picture
+  gl.uniform1f(uniform.grain, tl.on ? tl.grain : v("grain"));
+  gl.uniform1f(uniform.cell, (tl.on ? tl.size : v("grainsize")) * h / 1080);  // grain size is set for a 1080p picture
   gl.uniform1f(uniform.seed, Math.random());              // new grain on every frame
   gl.activeTexture(gl.TEXTURE0);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
@@ -585,7 +601,11 @@ $("set-out").onclick = () => setCut(1, head);
 document.addEventListener("keydown", e => {
   if (e.target.closest("input, select, button") || e.metaKey || e.ctrlKey || e.altKey) return;
   const step = {ArrowLeft: -1, ArrowRight: 1}[e.key];
-  if (e.key === " ") $("play").click();
+  if (tl.on) {  // while the timeline is showing, the keys drive it
+    if (e.key === " ") $("tl-play").click();
+    else if (step) cue(tl.at + step * (e.shiftKey ? 1 : 0.1), false);
+  }
+  else if (e.key === " ") $("play").click();
   else if (e.key === "i") setCut(0, head);
   else if (e.key === "o") setCut(1, head);
   else if (step) { seek(head + step * (e.shiftKey ? 1 : 0.1)); settle(); }
@@ -716,31 +736,195 @@ $("closeup").onpointerdown = e => {
 // ---- timeline: each clip keeps its own cut, grade (baked to a LUT by the server) and settings
 let clips = [], selected = null;
 const fail = (el, e) => { el.className = "status err"; el.textContent = e.message; };
+const total = () => clips.reduce((sum, c) => sum + c.end - c.start, 0);
+const starts = () => { let t = 0; return clips.map(c => (t += c.end - c.start) - (c.end - c.start)); };  // where each clip begins
+let tlZoom = 1, pps = 1;  // zoom 1 fits the whole timeline in the box; pps is pixels per second
 function drawClips() {
-  $("clips").textContent = "";
+  const box = $("clips"), all = total(), begin = starts();
+  leaveTimeline();
+  tl.files = null;  // the server is told again which files to serve when the timeline next plays
+  tl.at = Math.min(tl.at, all);
+  box.classList.toggle("none", !clips.length);
+  pps = all ? (box.clientWidth - 16) / all * tlZoom : 1;
+  $("lane").style.width = all * pps + "px";
+  $("ruler").textContent = $("track").textContent = "";
+  const step = [0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600, 1800, 3600].find(s => s * pps >= 64) || 3600;
+  for (let t = 0; t <= all; t += step) {
+    const tick = document.createElement("span");
+    tick.textContent = step < 1 ? stamp(t) : clock(t);
+    tick.style.left = t * pps + "px";
+    $("ruler").append(tick);
+  }
   clips.forEach((c, i) => {
-    const el = document.createElement("div");
-    el.className = "clip" + (c.id === selected ? " sel" : "");
-    el.innerHTML = `<button class="thumb"><img src="/clip/${c.id}.jpg?${c.v}" alt="Clip ${i + 1}"></button>
-      <div><span>${i + 1} · ${stamp(c.end - c.start)}</span><button class="quiet" aria-label="Move earlier">‹</button><button class="quiet" aria-label="Move later">›</button><button class="quiet" aria-label="Remove clip">×</button></div>`;
-    const [open, earlier, later, remove] = el.querySelectorAll("button");
-    open.title = `${c.input}\n${stamp(c.start)} – ${stamp(c.end)}\nClick to edit`;
-    open.onclick = () => { selected = c.id; drawClips(); restore(c.state); };
-    const move = j => { if (clips[j]) { clips.splice(j, 0, clips.splice(i, 1)[0]); drawClips(); persist(); } };
-    earlier.onclick = () => move(i - 1);
-    later.onclick = () => move(i + 1);
-    remove.onclick = () => {
-      clips.splice(i, 1);
-      if (selected === c.id) selected = null;
-      post("/api/clip/remove", {id: c.id});
-      drawClips(); persist();
-    };
-    $("clips").append(el);
+    const el = document.createElement("button");
+    el.className = "block" + (c.id === selected ? " sel" : "");
+    el.style.cssText = `left:${begin[i] * pps}px; width:${Math.max(3, (c.end - c.start) * pps - 1)}px; background-image:url(/clip/${c.id}.jpg?${c.v})`;
+    el.innerHTML = `<span>${i + 1} · ${stamp(c.end - c.start)}</span>`;
+    el.setAttribute("aria-label", `Clip ${i + 1}`);
+    el.title = `${c.input}\n${stamp(c.start)} – ${stamp(c.end)}\nClick to edit`;
+    el.onclick = () => { selected = c.id; drawClips(); restore(c.state); };
+    $("track").append(el);
   });
-  $("clips-note").textContent = clips.length
-    ? `${clips.length} clip${clips.length > 1 ? "s" : ""} · ${stamp(clips.reduce((sum, c) => sum + c.end - c.start, 0))}` : "";
-  $("clip-update").hidden = !selected;
+  $("clips-note").textContent = clips.length ? `${clips.length} clip${clips.length > 1 ? "s" : ""}` : "";
+  $("clip-update").hidden = $("clip-tools").hidden = !selected;
+  $("tl-play").disabled = !clips.length || !gl;
+  showTimeline();
 }
+function moveClip(by) {  // -1 earlier, 1 later, 0 remove
+  const i = clips.findIndex(c => c.id === selected);
+  if (i < 0 || !clips[i + by]) return;
+  const [c] = clips.splice(i, 1);
+  if (by) clips.splice(i + by, 0, c);
+  else { selected = null; post("/api/clip/remove", {id: c.id}); }
+  drawClips(); persist();
+}
+$("clip-earlier").onclick = () => moveClip(-1);
+$("clip-later").onclick = () => moveClip(1);
+$("clip-remove").onclick = () => moveClip(0);
+for (const [id, factor] of [["tl-zoom-in", 2], ["tl-zoom-out", 0.5]]) $(id).onclick = () => {
+  const fit = ($("clips").clientWidth - 16) / (total() || 1);
+  tlZoom = Math.max(1, Math.min(200 / fit, tlZoom * factor));  // up to 200 pixels per second
+  drawClips();
+  $("clips").scrollLeft = tl.at * pps - $("clips").clientWidth / 2;
+};
+addEventListener("resize", drawClips);
+
+// ---- timeline playback: the assembled clips, each through its own baked LUT, in players of
+// their own. One shows; the other is cued to the next clip ahead of time, so a cut does not
+// have to wait for a file to open or a seek to land.
+const players = [$("tvideo"), $("tvideo2")];
+let tvideo = players[0];  // the one showing
+const tl = {on: false, at: 0, clip: -1, grain: 0, size: 2, files: null, luts: {}, run: 0, busy: false, want: null, ahead: -1};
+const lutOf = async c => tl.luts[c.id + c.v] ||= new Float32Array(await (await fetch(`/clip/${c.id}.lut?${c.v}`)).arrayBuffer());
+function showClip(i) {  // clip i is now the one on screen: its LUT and grain go to the shader
+  const c = clips[i], key = c.id + c.v;
+  if (tl.lut !== key) { tex3d(1, IDENTITY); tex3d(2, tl.luts[key]); tl.lut = key; }  // the baked LUT already holds the input LUT
+  [tl.clip, tl.grain, tl.size] = [i, +c.state.sliders.grain || 0, +c.state.sliders.grainsize || 2];
+}
+async function aim(player, i, t) {  // open clip i's file in a player at time t; false if the browser cannot play it
+  const url = "/video/t" + tl.files[i];
+  if (player.dataset.url !== url) {
+    player.dataset.url = url;
+    player.src = url + "?" + Date.now();
+    if (!await new Promise(done => { player.onloadeddata = () => done(true); player.onerror = () => done(false); })) return false;
+  }
+  if (player === tvideo && player.seeking) tl.want = t; else player.currentTime = t;
+  return true;
+}
+const lead = c => Math.min(0.7, c.start);  // the idle player starts this long before its clip, to be moving at the cut
+function standby() {  // cue the idle player to just before the next clip
+  const run = tl.run, i = tl.clip + 1, idle = players.find(p => p !== tvideo);
+  tl.ahead = -1;
+  idle.pause();
+  if (clips[i] && tl.files[i] !== null)
+    Promise.all([aim(idle, i, clips[i].start - lead(clips[i])), lutOf(clips[i])]).then(([ok]) => { if (ok && run === tl.run) tl.ahead = i; }, () => {});
+}
+function showTimeline() {
+  $("lane").style.setProperty("--at", tl.at * pps + "px");
+  $("tl-time").textContent = `${stamp(tl.at)} / ${stamp(total())}`;
+  $("tl-play").textContent = tl.on && !tvideo.paused ? "Pause" : "Play timeline";
+  if (tl.on) $("tl-tag").textContent = `Timeline · clip ${tl.clip + 1} of ${clips.length}`;
+}
+function leaveTimeline() {  // back to the clip being edited, with its LUTs in the shader again
+  if (!tl.on) return;
+  tl.run++;
+  tl.on = false;
+  for (const p of players) p.pause();
+  viewer.classList.remove("timeline");
+  lutPath = null;
+  inputLut();
+  if (loaded) preview(); else tex3d(2, IDENTITY);
+  showTimeline();
+  draw();
+}
+// Show the timeline at `at` seconds, playing or paused. A newer call overtakes an unfinished one.
+async function cue(at, play) {
+  const run = ++tl.run, status = $("export-status");
+  tl.busy = true;
+  try {
+    if (!tl.files) {
+      tl.files = (await (await post("/api/timeline", {inputs: clips.map(c => c.input)})).json()).files;
+      for (const p of players) p.dataset.url = "";  // the server's file numbers may have changed
+    }
+    if (run !== tl.run) return;
+    const begin = starts(), all = total();
+    at = Math.min(all, Math.max(0, at));
+    let i = Math.max(0, begin.findLastIndex(s => s <= at));
+    if (at >= all) [i, at, play] = [clips.length - 1, all, false];  // the end: rest on the last frame
+    for (; i < clips.length && tl.files[i] === null; i++) at = begin[i + 1] ?? all;  // a clip the browser cannot play
+    const c = clips[i];
+    if (!c) throw new Error("The rest of the timeline cannot be played here (web links and stills only show in the export).");
+    await lutOf(c);
+    if (run !== tl.run) return;
+    if (!tl.on) { video.pause(); viewer.classList.add("timeline"); tl.on = true; tl.lut = null; }
+    showClip(i);
+    tl.at = at;
+    tl.want = null;
+    const ok = await aim(tvideo, i, Math.min(c.end - 0.001, c.start + at - begin[i]));
+    if (run !== tl.run) return;
+    if (!ok) { tl.files[i] = null; tvideo.dataset.url = ""; return cue(begin[i + 1] ?? all, play); }
+    standby();
+    tvideo.volume = 1;
+    tvideo.playbackRate = 1;
+    if (play) await tvideo.play(); else tvideo.pause();
+    status.textContent = "";
+  } catch (e) {
+    if (run === tl.run && e.name !== "AbortError") { players.forEach(p => p.pause()); fail(status, e); }
+  }
+  finally { if (run === tl.run) { tl.busy = false; showTimeline(); } }
+}
+function timelineTick(player) {  // runs for every frame a timeline player shows
+  const c = clips[tl.clip], next = tl.clip + 1;
+  if (player === tvideo && tl.on && c && !tl.busy) {
+    if (!tvideo.paused && !tvideo.seeking) {
+      tl.at = starts()[tl.clip] + Math.min(c.end, Math.max(c.start, tvideo.currentTime)) - c.start;
+      const idle = players.find(p => p !== tvideo);
+      const left = c.end - tvideo.currentTime, ready = tl.ahead === next && !idle.seeking && idle.readyState >= 2;
+      if (left > 0) {
+        // A paused player takes a few tenths of a second to get going. So the waiting one is started,
+        // at zero volume, shortly before the cut, and its speed trimmed so it reaches its In point at the cut.
+        if (!ready) {}
+        else if (idle.paused) { if (left <= lead(clips[next]) + 0.3) { idle.volume = 0; idle.play().catch(() => {}); } }
+        else idle.playbackRate = Math.min(3, Math.max(0.25, (clips[next].start - idle.currentTime) / left));
+      }
+      else if (ready) {  // cut to the player that is waiting
+        tvideo.pause();
+        tvideo = idle;
+        tvideo.volume = 1;
+        tvideo.playbackRate = 1;
+        showClip(next);
+        if (tvideo.paused) tvideo.play().catch(() => {});
+        standby();
+      }
+      else cue(starts()[next] ?? total(), next < clips.length);  // not ready, or the end of the timeline
+      const box = $("clips"), x = tl.at * pps;
+      if (x < box.scrollLeft || x > box.scrollLeft + box.clientWidth - 16) box.scrollLeft = x - 8;  // follow the playhead
+      showTimeline();
+    }
+    draw();
+  }
+  player.requestVideoFrameCallback(() => timelineTick(player));
+}
+for (const p of players) {
+  p.addEventListener("seeked", () => {  // as in the clip player: draw when a seek lands, then start the newest one asked for
+    if (p !== tvideo) return;
+    draw();
+    if (tl.want !== null) { p.currentTime = tl.want; tl.want = null; }
+  });
+  for (const type of ["play", "pause"]) p.addEventListener(type, showTimeline);
+  if (gl) p.requestVideoFrameCallback(() => timelineTick(p));
+}
+$("tl-play").onclick = () => tl.on && !tvideo.paused ? players.forEach(p => p.pause()) : cue(tl.at >= total() - 0.05 ? 0 : tl.at, true);
+$("ruler").onpointerdown = e => {
+  const ruler = $("ruler"), to = e => cue((e.clientX - ruler.getBoundingClientRect().left) / pps, false);
+  ruler.setPointerCapture(e.pointerId);
+  ruler.onpointermove = to;
+  ruler.onpointerup = () => ruler.onpointermove = ruler.onpointerup = null;
+  to(e);
+};
+// touching the editing controls or the clip player goes back to the clip being edited
+for (const el of document.querySelectorAll("aside, .transport, .seg, .strip")) el.addEventListener("pointerdown", leaveTimeline, true);
+
 async function addClip(id) {
   const status = $("export-status");
   status.className = "status";

@@ -61,7 +61,11 @@ skip Resolve altogether.
 5. **Cut and assemble** (optional): drag the In and Out markers on the scrub bar under the
    preview (or press I / O, use the Set buttons, or type a time such as `1:02.5`; Zoom + makes
    the bar cover less time for fine cuts), then click **Add clip**. Each clip keeps its
-   own cut and grade. Click a clip to load it back and **Update selected**; ‹ › reorder; × removes.
+   own cut and grade. The timeline shows the clips to scale under a time ruler. Click a clip to
+   load it back and **Update selected**; ‹ › move the selected clip; × removes it.
+   **Play timeline** plays the assembled clips in the preview, each through its own grade;
+   click or drag on the ruler to move along it (Space and the arrow keys work there too).
+   Touching the editing controls returns the preview to the clip being edited.
 6. **Export video**: renders the timeline to `~/Movies/Grade/<name>.mp4` (10-bit HEVC with
    audio). An existing file is never overwritten; a number is added to the name.
 7. **Save LUT** (the Resolve route): writes `<name>.cube` into a `Grade` subfolder of Resolve's LUT folder. In
@@ -116,6 +120,7 @@ All work is done in Oklab, on display-referred (Rec.709/sRGB) pixel values.
 | `GET /api/export` | Export state and progress; the page polls it every second. |
 | `POST /api/closeup`, `GET /closeup/before.png`, `/closeup/after.png` | Renders three frames at the playhead with the GPU exporter, with and without denoise, and serves a full-size crop of each. |
 | `GET /video/source` | The current local source file, with byte ranges, for the page's player. |
+| `POST /api/timeline`, `GET /video/t<n>`, `GET /clip/<id>.lut` | Timeline playback: registers the clips' files so the page may play them, and serves each clip's baked LUT as float32 rows. |
 | `POST /api/lut`, `/api/cube` | The grade, or an input LUT file, as raw float32 rows for the player's shader. |
 
 - **State is in memory**: the current frames, their statistics and resolved stream links.
@@ -139,6 +144,11 @@ All work is done in Oklab, on display-referred (Rec.709/sRGB) pixel values.
 - **Grain**: grey noise, new on every frame, added after the grade in proportion to l(1 − l), so
   mid-tones get the most and black and white none. Grain size is set for a 1080p picture and
   scales with the output. The same formula runs in the player's shader.
+- **Timeline playback**: two more hidden `<video>` players. One shows the current clip through
+  its baked LUT; the other is cued to the next clip and started at zero volume about 0.7 s
+  before the cut, with its speed trimmed so it reaches its In point as the cut arrives (a
+  paused player takes a few tenths of a second to get going). Measured on a four-clip, two-file
+  timeline: each cut cost about 0.1 s and the incoming clip started within two frames of its In.
 - **Clips**: the timeline lives in the page (`localStorage`); the server only holds each
   clip's baked LUT. With an input LUT, both are folded into one 64³ LUT (the GPU exporter's
   limit), because every LUT pass costs render time.
@@ -179,8 +189,11 @@ All work is done in Oklab, on display-referred (Rec.709/sRGB) pixel values.
 - **Grain makes files much larger** (it cannot be compressed away), and the encoder softens fine
   grain: below about 50% at size 1 little survives. Denoise can smooth faint real texture
   that barely moves.
-- **Editing is cuts only.** No transitions, titles, audio levels or music, and no playback
-  of the assembled timeline (only of the clip being cut). Cut points snap to 0.1 s.
+- **Editing is cuts only.** No transitions, titles, audio levels or music. Cut points snap
+  to 0.1 s.
+- **Timeline playback is a preview, not the export.** Cuts pause for about 0.1 s, each clip is
+  shown at its own shape (the export fits all to the first clip's), denoise is not shown,
+  and web-link clips are skipped.
 - **Matching is statistical.** It works when the two shots have broadly similar content. With
   different content it over-corrects (in testing, a colour match turned red sleeves brownish);
   lower the Colour strength.
@@ -211,6 +224,11 @@ All work is done in Oklab, on display-referred (Rec.709/sRGB) pixel values.
   differed with denoise on and the note said so with it off. It needs the GPU exporter and a
   local file (not a web link).
 
+- **Timeline playback**: in the built-in browser, on four clips from two files (one greyscale,
+  one 720p 30 fps): seeking to 13 positions gave the right clip, source time and grade each
+  time; playing through never ran backwards and stopped at the end; pause and resume,
+  ruler drag, keys, reorder, remove, zoom and a web-link clip (skipped) were each checked.
+
 ## Not yet verified
 
 - The player in Safari and Chrome. It was tested in one Chromium-based browser; it needs
@@ -222,7 +240,6 @@ All work is done in Oklab, on display-referred (Rec.709/sRGB) pixel values.
 
 ## Ideas not built
 
-- Play the assembled timeline in the page before exporting.
 - Crossfades.
 
 - Type a timestamp, or honour `?t=` in YouTube links, instead of dragging the slider.

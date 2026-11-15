@@ -36,7 +36,7 @@ CLIP_ID = r"[0-9a-f]{8}"
 frames = {}   # "source" / "reference" -> float RGB array
 stats = {}    # same keys -> grade.stats() of that frame
 streams = {}  # video URL -> (direct stream URL, duration)
-playable = {}  # "source" -> the local video file the page may play, if there is one
+playable = {}  # "source", and "t0", "t1"… for timeline clips -> a local video file the page may play
 export = {"state": "idle", "progress": 0, "text": ""}  # the one export job: idle / running / done / error
 closeups = {}  # "before" / "after" -> PNG of the last close-up
 job = {}      # "proc": the ffmpeg now running; "cancel": set once the user asks to stop
@@ -165,6 +165,27 @@ def bake(p):
     write_grade(CLIP_DIR / f"{cid}.cube", p, fn)
     (CLIP_DIR / f"{cid}.jpg").write_bytes(jpeg(thumb))
     return cid
+
+
+def timeline_files(inputs):
+    """Let the page play the timeline's clips: for each input, the number of its /video/t<n>, or None
+    for one a browser cannot be handed (a web link, a still, a missing file)."""
+    paths, keys = [], []
+    for inp in inputs:
+        try:
+            src, duration = resolve_input(inp) if not re.match(r"https?://", inp) else ("", 0)
+        except RuntimeError:
+            duration = 0
+        if not duration:
+            keys.append(None)
+            continue
+        if src not in paths:
+            paths.append(src)
+        keys.append(paths.index(src))
+    for k in [k for k in playable if k != "source"]:
+        del playable[k]
+    playable.update({f"t{n}": path for n, path in enumerate(paths)})
+    return keys
 
 
 def texture(c, h):
@@ -387,8 +408,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send(export)
         elif path in ("/closeup/before.png", "/closeup/after.png") and path[9:-4] in closeups:
             self.send(closeups[path[9:-4]], "image/png")
-        elif path == "/video/source" and playable.get("source"):
-            self.send_video(playable["source"])
+        elif re.fullmatch(rf"/clip/{CLIP_ID}\.lut", path) and (CLIP_DIR / path[6:]).with_suffix(".cube").is_file():
+            rows = grade.read_cube((CLIP_DIR / path[6:]).with_suffix(".cube")).transpose(2, 1, 0, 3)  # as /api/cube
+            self.send(rows.astype("<f4").tobytes(), "application/octet-stream")
+        elif re.fullmatch(r"/video/(source|t\d+)", path) and playable.get(path[7:]):
+            self.send_video(playable[path[7:]])
         else:
             self.send({"error": "not found"}, code=404)
 
@@ -423,6 +447,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send({"path": str(LUT_DIR / f"{name}.cube")})
             elif self.path == "/api/clip":
                 self.send({"id": bake(p)})
+            elif self.path == "/api/timeline":
+                self.send({"files": timeline_files(p["inputs"])})
             elif self.path == "/api/closeup":
                 self.send(closeup(p))
             elif self.path == "/api/clip/remove":
