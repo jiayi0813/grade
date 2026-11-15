@@ -1,0 +1,755 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Grade</title>
+<style>
+  /* Chrome stays neutral grey: coloured UI would bias colour judgement.
+     The only colour is on the tracks of sliders that move colour. */
+  :root {
+    --bg:#141414; --panel:#1c1c1c; --field:#121212; --raised:#2b2b2b; --line:#303030;
+    --text:#c9c9c9; --dim:#7f7f7f; --hi:#f4f4f4; --err:#e3a6a6;
+    --cool-warm: linear-gradient(to right, #4d7dbd, #6a6a6a 50%, #cc9a45);
+    --green-magenta: linear-gradient(to right, #56a063, #6a6a6a 50%, #b562ad);
+    --blue-yellow: linear-gradient(to right, #4f73c4, #6a6a6a 50%, #cdb748);
+  }
+  * { box-sizing:border-box; }
+  html, body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:13px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+         -webkit-font-smoothing:antialiased; }
+  .app { display:grid; grid-template-columns:316px minmax(0,1fr); height:100vh; }
+
+  /* ---- side panel */
+  aside { background:var(--panel); border-right:1px solid var(--line); display:flex; flex-direction:column; min-height:0; }
+  .brand { padding:14px 18px 12px; border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:10px; }
+  .brand b { color:var(--hi); font-size:15px; font-weight:650; letter-spacing:-.01em; }
+  .brand span { color:var(--dim); font-size:12px; }
+  .scroll { flex:1; overflow-y:auto; padding:4px 18px 18px; }
+  section { padding:16px 0 18px; border-bottom:1px solid var(--line); }
+  section:last-child { border-bottom:0; }
+  h2 { margin:0 0 10px; font-size:12px; font-weight:600; color:var(--hi); display:flex; align-items:center; gap:8px; }
+  h2 i { font-style:normal; font-size:10px; width:17px; height:17px; border-radius:50%; background:var(--raised); color:var(--text);
+         display:grid; place-items:center; font-variant-numeric:tabular-nums; }
+  h2 button { margin-left:auto; }
+  h3 { margin:14px 0 2px; font-size:10px; font-weight:600; letter-spacing:.09em; text-transform:uppercase; color:var(--dim); }
+  .hint { color:var(--dim); font-size:12px; margin:-4px 0 8px; }
+
+  input[type=text] { width:100%; min-width:0; background:var(--field); color:var(--hi); border:1px solid var(--line); border-radius:6px;
+                     padding:7px 9px; font:inherit; }
+  input[type=text]::placeholder { color:#5c5c5c; }
+  input[type=text]:hover { border-color:#444; }
+  :focus-visible { outline:2px solid #a8a8a8; outline-offset:1px; }
+  button { background:var(--raised); color:var(--hi); border:1px solid #3b3b3b; border-radius:6px; padding:6px 11px; font:inherit;
+           cursor:pointer; white-space:nowrap; }
+  button:hover { background:#363636; }
+  button.quiet { background:none; border:0; color:var(--dim); padding:2px 4px; font-size:12px; }
+  button.quiet:hover { color:var(--hi); background:none; }
+  .field { display:flex; gap:6px; }
+  .field + .field { margin-top:6px; }
+  .timeline { display:flex; align-items:center; gap:10px; margin-top:10px; }
+  .timeline span:first-child { color:var(--dim); font-size:12px; white-space:nowrap; }
+  .time { color:var(--text); font-variant-numeric:tabular-nums; min-width:38px; text-align:right; font-size:12px; }
+  .pick { display:flex; align-items:center; gap:10px; margin-top:8px; font-size:12px; color:var(--dim); white-space:nowrap; }
+  select { flex:1; min-width:0; background:var(--field); color:var(--hi); border:1px solid var(--line); border-radius:6px; padding:5px 8px;
+           font:inherit; font-size:12px; }
+  .status { color:var(--dim); font-size:12px; min-height:17px; margin-top:3px; overflow-wrap:anywhere; }
+  .status.err { color:var(--err); }
+
+  /* ---- sliders */
+  input[type=range] { -webkit-appearance:none; appearance:none; width:100%; height:18px; margin:0; background:transparent; cursor:pointer; }
+  input[type=range]::-webkit-slider-runnable-track { height:3px; border-radius:2px; background:var(--track, #474747); }
+  input[type=range]::-moz-range-track { height:3px; border-radius:2px; background:var(--track, #474747); }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:13px; height:13px; margin-top:-5px; border-radius:50%;
+                                            background:#ececec; border:0; box-shadow:0 0 0 2px var(--panel), 0 1px 3px #000; }
+  input[type=range]::-moz-range-thumb { width:13px; height:13px; border-radius:50%; background:#ececec; border:0; box-shadow:0 0 0 2px var(--panel); }
+  input[type=range]:disabled { opacity:.35; cursor:default; }
+  .slider { display:block; margin-top:9px; }
+  .slider div { display:flex; justify-content:space-between; font-size:12px; }
+  .slider .val { color:var(--dim); font-variant-numeric:tabular-nums; }
+  .slider.changed .val { color:var(--hi); }
+
+  /* ---- save footer */
+  aside footer { border-top:1px solid var(--line); padding:14px 18px 12px; background:#191919; }
+  .primary { background:#ececec; color:#111; border-color:#ececec; font-weight:600; }
+  .primary:hover { background:#fff; }
+
+  /* ---- viewer */
+  main { display:flex; flex-direction:column; min-width:0; min-height:0; padding:14px 16px 16px; gap:12px; overflow-y:auto; }
+  .bar { display:flex; align-items:center; gap:12px; min-height:28px; }
+  .bar .title { color:var(--hi); font-weight:600; }
+  .bar .note { color:var(--dim); font-size:12px; }
+  .seg { margin-left:auto; display:flex; background:var(--field); border:1px solid var(--line); border-radius:7px; padding:2px; }
+  .seg button { background:none; border:0; border-radius:5px; padding:3px 11px; color:var(--dim); font-size:12px; }
+  .seg button[aria-pressed=true] { background:var(--raised); color:var(--hi); }
+  .viewer { flex:1; min-height:220px; position:relative; background:#0b0b0b; border:1px solid var(--line); border-radius:10px; overflow:hidden;
+            touch-action:none; user-select:none; -webkit-user-select:none; }
+  .viewer img { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; -webkit-user-drag:none; display:none; }
+  .viewer.ready img { display:block; }
+  /* video mode: a canvas shows the playing video through the grade; the stills stay for the histogram */
+  .viewer video { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }
+  .viewer canvas { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; display:none; }
+  .viewer.video canvas { display:block; }
+  .viewer.video img { display:none; }
+  .viewer[data-mode=split] { cursor:ew-resize; }
+  .viewer[data-mode=split] #orig { clip-path:inset(0 calc(100% - var(--split, 50%)) 0 0); }
+  .viewer[data-mode=graded] #orig { display:none; }
+  .handle { position:absolute; top:0; bottom:0; left:var(--split, 50%); width:1px; background:#fff; box-shadow:0 0 0 1px #0006; display:none; pointer-events:none; }
+  .handle::after { content:"‹ ›"; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); width:30px; height:30px; border-radius:50%;
+                   background:#f2f2f2; color:#111; display:grid; place-items:center; font-size:13px; font-weight:700; box-shadow:0 2px 8px #0009; }
+  .tag { position:absolute; top:10px; padding:2px 8px; border-radius:5px; background:#000a; color:#eee; font-size:11px; display:none; pointer-events:none; }
+  .tag.l { left:10px; } .tag.r { right:10px; }
+  .viewer.ready[data-mode=split] .handle, .viewer.ready[data-mode=split] .tag { display:block; }
+  .empty { position:absolute; inset:0; display:grid; place-content:center; text-align:center; gap:4px; color:var(--dim); }
+  .empty b { color:var(--text); font-weight:600; font-size:14px; }
+  .viewer.ready .empty { display:none; }
+
+  /* ---- player controls and scrub bar */
+  .transport { flex:none; display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+  .transport button { padding:4px 10px; font-size:12px; }
+  .transport button:disabled { opacity:.4; cursor:default; }
+  #play { min-width:58px; }
+  #play-time { min-width:104px; text-align:left; }
+  .cut { display:flex; align-items:center; gap:6px; margin-left:auto; font-size:12px; color:var(--dim); }
+  .cut input[type=text] { width:62px; padding:4px 6px; font-size:12px; font-variant-numeric:tabular-nums; }
+  .cut button + label { margin-left:8px; }
+  .scrub { flex:1 1 100%; position:relative; height:24px; margin:0 11px; cursor:pointer; touch-action:none;
+           clip-path:inset(0 -11px); /* hides markers that lie outside a zoomed-in bar */ }
+  .scrub::before { content:""; position:absolute; left:0; right:0; top:10px; height:4px; border-radius:2px; background:#3a3a3a; }
+  .scrub .sel { position:absolute; top:5px; height:14px; left:var(--in, 0%); width:calc(var(--out, 100%) - var(--in, 0%)); background:#8f8f8f66;
+                border-top:1px solid #cfcfcf; border-bottom:1px solid #cfcfcf; pointer-events:none; }
+  .scrub .mark { position:absolute; top:2px; width:11px; height:20px; background:#ececec; cursor:ew-resize; }
+  .scrub .mark::after { content:""; position:absolute; top:6px; left:5px; width:1px; height:8px; background:#555; }
+  .scrub .mark.in { left:var(--in, 0%); transform:translateX(-100%); border-radius:4px 0 0 4px; }
+  .scrub .mark.out { left:var(--out, 100%); border-radius:0 4px 4px 0; }
+  .scrub .head { position:absolute; top:0; bottom:0; left:var(--head, 0%); width:2px; margin-left:-1px; background:#fff; box-shadow:0 0 0 1px #000a;
+                 pointer-events:none; }
+
+  /* ---- strip under the viewer */
+  .strip { display:grid; grid-template-columns:1fr 1fr 1.25fr; gap:12px; height:132px; flex:none; }
+  figure { margin:0; min-width:0; display:flex; flex-direction:column; gap:5px; }
+  figcaption { font-size:10px; font-weight:600; letter-spacing:.09em; text-transform:uppercase; color:var(--dim); display:flex; gap:10px;
+               white-space:nowrap; overflow:hidden; }
+  figcaption span { letter-spacing:0; text-transform:none; font-weight:400; margin-left:auto; display:flex; gap:10px; }
+  figcaption em { font-style:normal; display:inline-flex; align-items:center; gap:4px; }
+  figcaption em::before { content:""; width:12px; height:0; border-top:2px solid #f2f2f2; }
+  figcaption em.ref::before { border-top:2px dashed #9a9a9a; }
+  figcaption em.org::before { height:8px; border:0; background:#3d3d3d; }
+  .frame { flex:1; min-height:0; position:relative; background:#0b0b0b; border:1px solid var(--line); border-radius:8px; overflow:hidden;
+           display:grid; place-items:center; color:#555; font-size:12px; }
+  .frame img { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; }
+  .frame canvas { position:absolute; inset:0; width:100%; height:100%; }
+  .frame.loading::after { content:""; position:absolute; width:20px; height:20px; border-radius:50%; border:2px solid #fff3; border-top-color:#fff;
+                          animation:spin .8s linear infinite; }
+  .frame.loading img { opacity:.35; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  @media (prefers-reduced-motion:reduce) { .frame.loading::after { animation-duration:2.4s; } }
+
+  /* ---- timeline under the strip */
+  .edit { flex:none; display:flex; flex-direction:column; gap:8px; }
+  .edit .bar { flex-wrap:wrap; gap:8px; }
+  .edit .bar select { flex:none; width:auto; margin-left:auto; }
+  .edit .bar input[type=text] { width:140px; }
+  .clips { display:flex; gap:8px; overflow-x:auto; min-height:94px; padding:8px; background:#0f0f0f; border:1px solid var(--line); border-radius:8px; }
+  .clips:empty::before { content:"Set In and Out in step 1, grade the shot, then click Add clip."; margin:auto; color:var(--dim); font-size:12px; }
+  .clip { flex:none; width:104px; }
+  .clip .thumb { display:block; width:100%; height:56px; padding:0; border:1px solid var(--line); border-radius:6px; overflow:hidden; background:#0b0b0b; }
+  .clip.sel .thumb { border-color:#ececec; box-shadow:0 0 0 1px #ececec; }
+  .clip .thumb img { display:block; width:100%; height:100%; object-fit:cover; }
+  .clip div { display:flex; align-items:center; font-size:11px; color:var(--dim); margin-top:2px; }
+  .clip div span { margin-right:auto; font-variant-numeric:tabular-nums; }
+  .clip.sel div span { color:var(--hi); }
+
+  @media (max-width:720px) {
+    .app { grid-template-columns:1fr; height:auto; }
+    aside { border-right:0; }
+    .viewer { min-height:56vw; }
+    .strip { grid-template-columns:1fr 1fr; height:auto; }
+    .strip figure { height:120px; }
+    .strip figure:last-child { grid-column:1 / -1; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <div class="brand"><b>Grade</b><span>Grade, cut and export</span></div>
+    <div class="scroll">
+      <section>
+        <h2><i>1</i>Your video</h2>
+        <div class="field"><input type="text" id="source-input" placeholder="Path to a video or still" aria-label="Path to your video"><button id="source-browse">Browse</button></div>
+        <div class="field"><input type="text" id="input-lut" placeholder="Input LUT for log footage (optional)" aria-label="Input LUT path"><button id="input-lut-browse">Browse</button></div>
+        <div class="timeline" title="The frame the match is measured from. Playing or scrubbing the preview does not change it."><span>Match frame</span><input type="range" id="source-time" min="0" max="0" step="0.1" value="0" disabled aria-label="Frame the match is measured from"><span class="time" id="source-time-val">0:00</span></div>
+        <label class="pick">Match from<select id="source-sample" aria-label="Frames sampled from your video">
+          <option value="frame">This frame only</option><option value="nearby" selected>Frames within 5 s</option><option value="whole">The whole video</option></select></label>
+        <div class="status" id="source-status"></div>
+      </section>
+
+      <section>
+        <h2><i>2</i>Reference</h2>
+        <div class="field"><input type="text" id="reference-input" placeholder="YouTube link or file path" aria-label="Reference link or path"><button id="reference-browse">Browse</button></div>
+        <div class="timeline"><input type="range" id="reference-time" min="0" max="0" step="0.1" value="0" disabled aria-label="Frame time in the reference"><span class="time" id="reference-time-val">0:00</span></div>
+        <label class="pick">Match from<select id="reference-sample" aria-label="Frames sampled from the reference">
+          <option value="frame">This frame only</option><option value="nearby" selected>Frames within 5 s</option><option value="whole">The whole video</option></select></label>
+        <div class="status" id="reference-status"></div>
+      </section>
+
+      <section>
+        <h2><i>3</i>Match to reference</h2>
+        <div id="g-match"></div>
+      </section>
+
+      <section>
+        <h2><i>4</i>Look<button class="quiet" id="reset">Reset</button></h2>
+        <p class="hint">Applied on top of the match. Double-click a slider to reset it.</p>
+        <h3>Tone</h3><div id="g-tone"></div>
+        <h3>Colour</h3><div id="g-colour"></div>
+        <h3>Shadows tint</h3><div id="g-shadows"></div>
+        <h3>Highlights tint</h3><div id="g-highlights"></div>
+      </section>
+    </div>
+    <footer>
+      <div class="field"><input type="text" id="lut-name" value="my grade" aria-label="LUT name"><button class="primary" id="save">Save LUT</button></div>
+      <div class="status" id="save-status">Saves into Resolve's LUT folder.</div>
+    </footer>
+  </aside>
+
+  <main>
+    <div class="bar">
+      <span class="title">Preview</span><span class="note" id="viewer-note"></span>
+      <div class="seg" role="group" aria-label="Preview mode">
+        <button data-mode="split" aria-pressed="true">Split</button><button data-mode="graded" aria-pressed="false">Graded</button><button data-mode="original" aria-pressed="false">Original</button>
+      </div>
+    </div>
+    <div class="viewer" id="viewer" data-mode="split">
+      <img id="graded" alt="Graded frame"><img id="orig" alt="Original frame">
+      <video id="video" playsinline preload="auto"></video><canvas id="stage" aria-label="Video preview"></canvas>
+      <div class="handle"></div><span class="tag l">Original</span><span class="tag r">Graded</span>
+      <div class="empty"><b>Load a video to start</b><span>Paste a path or click Browse in step 1.</span></div>
+    </div>
+    <div class="transport">
+      <button id="replay" disabled title="Play the selection from In">Replay</button><button id="play" disabled title="Space">Play</button>
+      <span class="time" id="play-time">0:00.0 / 0:00</span>
+      <button class="quiet" id="match-here" title="Measure the match from the frame shown">Match from this frame</button>
+      <div class="cut"><label for="cut-in">In</label><input type="text" id="cut-in" value="0:00.0"><button id="set-in" title="Start the clip at the frame shown (I)">Set</button>
+        <label for="cut-out">Out</label><input type="text" id="cut-out" value="0:00.0"><button id="set-out" title="End the clip at the frame shown (O)">Set</button>
+        <label>Zoom</label><button id="zoom-out" aria-label="Zoom the scrub bar out">−</button><button id="zoom-in" aria-label="Zoom the scrub bar in">+</button></div>
+      <div class="scrub" id="scrub"><div class="sel"></div><div class="mark in" data-mark="0" title="In: drag to move"></div><div class="mark out" data-mark="1" title="Out: drag to move"></div><div class="head"></div></div>
+    </div>
+    <div class="strip">
+      <figure><figcaption>Your video</figcaption><div class="frame" id="source-frame">No frame</div></figure>
+      <figure><figcaption>Reference</figcaption><div class="frame" id="reference-frame">Optional</div></figure>
+      <figure><figcaption>Brightness<span><em>Graded</em><em class="ref">Ref</em><em class="org">Original</em></span></figcaption>
+        <div class="frame"><canvas id="scope" aria-label="Brightness histogram"></canvas></div></figure>
+    </div>
+    <div class="edit">
+      <div class="bar">
+        <span class="title">Timeline</span><span class="note" id="clips-note"></span>
+        <button id="clip-add">Add clip</button><button id="clip-update" hidden>Update selected</button>
+        <select id="export-size" aria-label="Export size"><option value="full">Original size</option><option value="hd">1080p</option></select>
+        <input type="text" id="export-name" value="my video" aria-label="Export file name"><button class="primary" id="export">Export video</button>
+      </div>
+      <div class="clips" id="clips"></div>
+      <div class="status" id="export-status"></div>
+    </div>
+  </main>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const post = async (url, body) => {
+  const r = await fetch(url, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+  if (!r.ok) throw new Error((await r.json()).error);
+  return r;
+};
+const clock = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+const stamp = s => { s = Math.round(s * 10) / 10; return `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0")}`; };
+const seconds = text => text.trim().split(":").reduce((a, x) => a * 60 + +x, 0);
+const signed = n => (n > 0 ? "+" : "") + n;
+const pct = v => Math.round(v * 100) + "%";
+const tint = v => signed(Math.round(v * 1000));
+
+// ---- sliders: group, key, label, min, max, step, default, value format, track gradient
+const SLIDERS = [
+  ["match", "tone", "Brightness and contrast", 0, 1, 0.01, 1, pct],
+  ["match", "colour", "Colour", 0, 1, 0.01, 1, pct],
+  ["tone", "exposure", "Exposure", -2, 2, 0.05, 0, v => signed(v.toFixed(2))],
+  ["tone", "contrast", "Contrast", 0.5, 1.5, 0.01, 1, v => v.toFixed(2)],
+  ["tone", "fade", "Fade blacks", 0, 0.2, 0.005, 0, v => (v * 100).toFixed(1)],
+  ["colour", "saturation", "Saturation", 0, 2, 0.01, 1, pct],
+  ["colour", "temp", "Temperature", -0.05, 0.05, 0.001, 0, tint, "cool-warm"],
+  ["colour", "tint", "Tint", -0.05, 0.05, 0.001, 0, tint, "green-magenta"],
+  ["shadows", "sa", "Green – magenta", -0.05, 0.05, 0.001, 0, tint, "green-magenta"],
+  ["shadows", "sb", "Blue – yellow", -0.05, 0.05, 0.001, 0, tint, "blue-yellow"],
+  ["highlights", "ha", "Green – magenta", -0.05, 0.05, 0.001, 0, tint, "green-magenta"],
+  ["highlights", "hb", "Blue – yellow", -0.05, 0.05, 0.001, 0, tint, "blue-yellow"],
+];
+const shows = {};
+for (const [group, key, label, min, max, step, def, fmt, track] of SLIDERS) {
+  const el = document.createElement("label");
+  el.className = "slider";
+  el.innerHTML = `<div><span>${label}</span><span class="val"></span></div>
+    <input type="range" id="${key}" min="${min}" max="${max}" step="${step}" value="${def}">`;
+  $("g-" + group).append(el);
+  const input = el.querySelector("input");
+  if (track) input.style.setProperty("--track", `var(--${track})`);
+  shows[key] = () => {
+    el.querySelector(".val").textContent = fmt(+input.value);
+    el.classList.toggle("changed", +input.value !== def);
+  };
+  input.addEventListener("input", () => { shows[key](); preview(); persist(); });
+  input.addEventListener("dblclick", () => { input.value = def; input.dispatchEvent(new Event("input")); });
+  shows[key]();
+}
+const v = key => +$(key).value;
+const params = () => ({
+  tone: v("tone"), colour: v("colour"),
+  look: {exposure: v("exposure"), contrast: v("contrast"), fade: v("fade"), saturation: v("saturation"),
+         temp: v("temp"), tint: v("tint"), shadows: [v("sa"), v("sb")], highlights: [v("ha"), v("hb")]},
+});
+$("reset").onclick = () => {
+  for (const [group, key,,,,, def] of SLIDERS) if (group !== "match") { $(key).value = def; shows[key](); }
+  preview(); persist();
+};
+
+// ---- viewer: split / graded / original
+const viewer = $("viewer");
+const setMode = mode => {
+  viewer.dataset.mode = mode;
+  for (const b of document.querySelectorAll(".seg button")) b.setAttribute("aria-pressed", b.dataset.mode === mode);
+  $("viewer-note").textContent = mode === "split" ? "Drag across the image to compare" : "";
+  draw();
+};
+for (const b of document.querySelectorAll(".seg button")) b.onclick = () => { setMode(b.dataset.mode); persist(); };
+const drag = e => {
+  const r = viewer.getBoundingClientRect();
+  viewer.style.setProperty("--split", Math.min(100, Math.max(0, (e.clientX - r.left) / r.width * 100)) + "%");
+  draw();
+};
+viewer.addEventListener("pointerdown", e => { if (viewer.dataset.mode === "split") { viewer.setPointerCapture(e.pointerId); drag(e); } });
+viewer.addEventListener("pointermove", e => { if (viewer.hasPointerCapture(e.pointerId)) drag(e); });
+viewer.addEventListener("pointerup", persist);
+
+// ---- preview (one request at a time; the latest slider state always wins)
+let busy = false, again = false, loaded = false;
+async function preview() {
+  if (!loaded) return;
+  if (busy) { again = true; return; }
+  busy = true;
+  try {
+    const [blob, lut] = await Promise.all([post("/api/preview", params()).then(r => r.blob()),
+                                           gl ? post("/api/lut", params()).then(r => r.arrayBuffer()) : null]);
+    if (lut) { tex3d(2, new Float32Array(lut)); draw(); }
+    const old = $("graded").src;
+    $("graded").src = URL.createObjectURL(blob);
+    if (old.startsWith("blob:")) URL.revokeObjectURL(old);
+    viewer.classList.add("ready");
+  } catch (e) { $("source-status").className = "status err"; $("source-status").textContent = e.message; }
+  busy = false;
+  if (again) { again = false; preview(); }
+}
+
+// ---- brightness histogram of graded / reference / original
+const histogram = img => {
+  if (!img || !img.naturalWidth) return null;
+  const c = document.createElement("canvas");
+  c.width = 128; c.height = 72;
+  const x = c.getContext("2d", {willReadFrequently: true});
+  x.drawImage(img, 0, 0, c.width, c.height);
+  const d = x.getImageData(0, 0, c.width, c.height).data, bins = new Float32Array(64);
+  for (let i = 0; i < d.length; i += 4) bins[Math.min(63, (0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]) >> 2)]++;
+  const peak = Math.max(...bins.subarray(1, 63)) || 1;  // ignore clipped black/white spikes
+  return bins.map(b => Math.min(1, b / peak));
+};
+function drawScope() {
+  const c = $("scope"), dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+  if (!w) return;
+  c.width = w * dpr; c.height = h * dpr;
+  const x = c.getContext("2d");
+  x.scale(dpr, dpr);
+  const path = (bins, close) => {
+    x.beginPath();
+    bins.forEach((b, i) => x[i ? "lineTo" : "moveTo"](6 + i / 63 * (w - 12), h - 6 - b * (h - 14)));
+    if (close) { x.lineTo(w - 6, h - 6); x.lineTo(6, h - 6); x.closePath(); }
+  };
+  const org = histogram($("orig")), ref = histogram($("reference-frame").querySelector("img")), out = histogram($("graded"));
+  if (org) { path(org, true); x.fillStyle = "#3d3d3d"; x.fill(); }
+  if (ref) { path(ref); x.setLineDash([4, 3]); x.strokeStyle = "#9a9a9a"; x.lineWidth = 1.5; x.stroke(); x.setLineDash([]); }
+  if (out) { path(out); x.strokeStyle = "#f2f2f2"; x.lineWidth = 1.5; x.stroke(); }
+}
+$("graded").addEventListener("load", drawScope);
+$("orig").addEventListener("load", drawScope);
+window.addEventListener("resize", () => { drawScope(); draw(); });
+
+// ---- player: the browser plays the file itself and a shader grades each frame, so playing and
+// scrubbing never touch the server, or the match, which stays tied to the match frame of step 1
+const video = $("video"), stage = $("stage"), gl = stage.getContext("webgl2"), scrub = $("scrub");
+const IDENTITY = new Float32Array([0,0,0, 1,0,0, 0,1,0, 1,1,0, 0,0,1, 1,0,1, 0,1,1, 1,1,1]);
+const uniform = {}, luts = {};
+let srcLength = 0, cut = [0, 0], head = 0, videoPath = "", lutPath = "";
+let zoom = 1, view = [0, 0];  // the scrub bar shows this stretch of the video; zoom 1 is all of it
+function tex3d(unit, rows) {  // unit 1: input LUT, unit 2: grade; rows are RGB with red fastest
+  const n = Math.round(Math.cbrt(rows.length / 3));
+  gl.activeTexture(gl.TEXTURE0 + unit);
+  gl.bindTexture(gl.TEXTURE_3D, luts[unit] ||= gl.createTexture());
+  gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGB16F, n, n, n, 0, gl.RGB, gl.FLOAT, rows);
+  for (const k of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_3D, k, gl.LINEAR);
+  for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) gl.texParameteri(gl.TEXTURE_3D, k, gl.CLAMP_TO_EDGE);
+  gl.uniform1f(uniform["n" + unit], n);
+}
+if (gl) {
+  const shader = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); return s; };
+  const prog = gl.createProgram();
+  gl.attachShader(prog, shader(gl.VERTEX_SHADER, `#version 300 es
+    in vec2 p; out vec2 uv;
+    void main() { uv = vec2(p.x, 1. - p.y); gl_Position = vec4(p * 2. - 1., 0, 1); }`));
+  gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, `#version 300 es
+    precision highp float; precision highp sampler3D;
+    uniform sampler2D frame; uniform sampler3D lut1, lut2; uniform float n1, n2, split;
+    in vec2 uv; out vec4 colour;
+    vec3 look(sampler3D lut, float n, vec3 c) { return texture(lut, (clamp(c, 0., 1.) * (n - 1.) + .5) / n).rgb; }
+    void main() {
+      vec3 c = look(lut1, n1, texture(frame, uv).rgb);        // "original" is the video after its input LUT
+      colour = vec4(uv.x < split ? c : look(lut2, n2, c), 1);
+    }`));
+  gl.linkProgram(prog);
+  gl.useProgram(prog);
+  for (const name of ["frame", "lut1", "lut2", "n1", "n2", "split"]) uniform[name] = gl.getUniformLocation(prog, name);
+  gl.uniform1i(uniform.lut1, 1);
+  gl.uniform1i(uniform.lut2, 2);
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0,0, 1,0, 0,1, 1,1]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  tex3d(1, IDENTITY);
+  tex3d(2, IDENTITY);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, gl.createTexture());
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, k, gl.CLAMP_TO_EDGE);
+}
+const inVideo = () => viewer.classList.contains("video");
+function draw() {
+  if (!inVideo() || video.readyState < 2) return;
+  const w = Math.min(video.videoWidth, 1920), h = Math.round(w * video.videoHeight / video.videoWidth);
+  if (stage.width !== w || stage.height !== h) { stage.width = w; stage.height = h; gl.viewport(0, 0, w, h); }
+  let split = viewer.dataset.mode === "graded" ? -1 : 2;
+  if (viewer.dataset.mode === "split") {  // the wipe is a share of the viewer; the picture is letterboxed inside it
+    const r = viewer.getBoundingClientRect(), shown = w * Math.min(r.width / w, r.height / h);
+    split = (parseFloat(viewer.style.getPropertyValue("--split") || "50") / 100 * r.width - (r.width - shown) / 2) / shown;
+  }
+  gl.uniform1f(uniform.split, split);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+async function inputLut() {
+  const path = $("input-lut").value.trim();
+  if (!gl || path === lutPath) return;
+  lutPath = path;
+  try { tex3d(1, path ? new Float32Array(await (await post("/api/cube", {path})).arrayBuffer()) : IDENTITY); }
+  catch { tex3d(1, IDENTITY); lutPath = ""; }
+  draw();
+}
+function setVideo(path, t) {  // "" for a still, a web link or a browser without WebGL: the stills stay in charge
+  if (!gl) path = "";
+  if (path !== videoPath) {
+    videoPath = path;
+    zoom = 1;
+    viewer.classList.remove("video");
+    $("play").disabled = $("replay").disabled = true;
+    video.src = path ? "/video/source?" + Date.now() : "";
+  }
+  setView(view[0]);
+  seek(t);
+}
+video.addEventListener("loadeddata", () => {
+  viewer.classList.add("video");
+  $("play").disabled = $("replay").disabled = false;
+  video.currentTime = head;
+});
+video.addEventListener("error", () => viewer.classList.remove("video"));  // e.g. a codec this browser cannot play
+for (const type of ["play", "pause"]) video.addEventListener(type, () => $("play").textContent = video.paused ? "Play" : "Pause");
+function tick() {  // runs for every frame shown while playing
+  const t = video.currentTime;
+  if (!video.paused) {
+    if (head < cut[1] && t >= cut[1]) video.pause();  // stop at Out
+    showHead(t);
+  }
+  draw();
+  video.requestVideoFrameCallback(tick);
+}
+if (gl) video.requestVideoFrameCallback(tick);
+// While paused the browser does not announce frames of a video that is not on screen itself, so
+// draw when a seek lands. Then start the newest seek asked for meanwhile: one seek at a time
+// keeps the picture following a drag instead of freezing until the mouse stops.
+let wanted = null;
+video.addEventListener("seeked", () => {
+  draw();
+  if (wanted !== null) { video.currentTime = wanted; wanted = null; }
+});
+$("play").onclick = () => {
+  if (!video.paused) return video.pause();
+  if (Math.abs(head - cut[1]) < 0.1) video.currentTime = cut[0];  // stopped at Out: go round again
+  video.play();
+};
+$("replay").onclick = () => { video.currentTime = cut[0]; video.play(); };
+
+// ---- scrub bar: playhead, and the In and Out markers of the clip being cut
+const place = t => (view[1] > view[0] ? (t - view[0]) / (view[1] - view[0]) * 100 : 0) + "%";
+function setView(start) {
+  const span = srcLength / zoom;
+  view[0] = Math.max(0, Math.min(srcLength - span, start));
+  view[1] = view[0] + span;
+  scrub.style.setProperty("--head", place(head));
+  showCut();
+}
+function showHead(t) {
+  head = t;
+  const span = view[1] - view[0];
+  if (t < view[0] || t > view[1]) setView(video.paused ? t - span / 2 : t);  // follow the playhead, a page at a time when playing
+  scrub.style.setProperty("--head", place(t));
+  $("play-time").textContent = `${stamp(t)} / ${clock(srcLength)}`;
+}
+for (const [id, factor] of [["zoom-in", 3], ["zoom-out", 1 / 3]]) $(id).onclick = () => {
+  zoom = Math.max(1, Math.min(srcLength / 5, zoom * factor));  // down to 5 seconds across the bar
+  setView(head - srcLength / zoom / 2);
+};
+function seek(t) {
+  showHead(Math.min(srcLength, Math.max(0, t)));
+  if (!inVideo()) return;
+  if (video.seeking) wanted = head; else video.currentTime = head;
+}
+// without a playable video the only picture is the server's still, so fetch the one at the playhead
+const settle = () => { if (!inVideo() && loaded) { $("source-time").value = head; inputs.source.label(); inputs.source.load(); } };
+const showCut = () => {
+  $("cut-in").value = stamp(cut[0]); $("cut-out").value = stamp(cut[1]);
+  scrub.style.setProperty("--in", place(cut[0])); scrub.style.setProperty("--out", place(cut[1]));
+};
+function setCut(i, t) {
+  if (srcLength && !isNaN(t)) {
+    t = Math.round(t * 10) / 10;
+    cut[i] = i ? Math.min(srcLength, Math.max(t, cut[0] + 0.1)) : Math.max(0, Math.min(t, cut[1] - 0.1));  // In stays before Out
+    persist();
+  }
+  showCut();
+}
+scrub.addEventListener("pointerdown", e => {
+  if (!srcLength) return;
+  const mark = e.target.dataset.mark, r = scrub.getBoundingClientRect();
+  const span = view[1] - view[0];
+  const grab = mark ? e.clientX - r.left - (cut[mark] - view[0]) / span * r.width : 0;  // where on the marker it was picked up
+  const move = e => {
+    const t = view[0] + Math.min(1, Math.max(0, (e.clientX - grab - r.left) / r.width)) * span;
+    if (mark) setCut(+mark, t);
+    seek(mark ? cut[mark] : t);
+  };
+  scrub.setPointerCapture(e.pointerId);
+  scrub.onpointermove = move;
+  scrub.onpointerup = () => { scrub.onpointermove = scrub.onpointerup = null; settle(); };
+  move(e);
+});
+$("set-in").onclick = () => setCut(0, head);
+$("set-out").onclick = () => setCut(1, head);
+["cut-in", "cut-out"].forEach((id, i) => $(id).addEventListener("change", () => {
+  setCut(i, seconds($(id).value));
+  seek(cut[i]);  // show the frame at the typed time
+  settle();
+}));
+document.addEventListener("keydown", e => {
+  if (e.target.closest("input, select, button") || e.metaKey || e.ctrlKey || e.altKey) return;
+  const step = {ArrowLeft: -1, ArrowRight: 1}[e.key];
+  if (e.key === " ") $("play").click();
+  else if (e.key === "i") setCut(0, head);
+  else if (e.key === "o") setCut(1, head);
+  else if (step) { seek(head + step * (e.shiftKey ? 1 : 0.1)); settle(); }
+  else return;
+  e.preventDefault();
+});
+
+// ---- source and reference inputs
+function setupInput(kind) {
+  const input = $(kind + "-input"), time = $(kind + "-time"), status = $(kind + "-status"), frame = $(kind + "-frame");
+  const label = () => $(kind + "-time-val").textContent = clock(+time.value);
+  const load = async () => {
+    if (!input.value.trim()) {
+      if (kind === "source") return;
+      await post("/api/frame", {kind, input: ""});  // a cleared reference must stop steering the match
+      frame.textContent = "Optional";
+      status.textContent = "";
+      preview();
+      return persist();
+    }
+    frame.classList.add("loading");
+    status.className = "status";
+    status.textContent = /^https?:/.test(input.value.trim()) ? "Fetching frame from the web…" : "Loading frame…";
+    try {
+      const input_lut = kind === "source" ? $("input-lut").value : "";
+      const {duration, samples} = await (await post("/api/frame",
+        {kind, input: input.value, time: +time.value, input_lut, sample: $(kind + "-sample").value})).json();
+      time.max = Math.max(0, duration - 0.1);
+      time.disabled = !duration;
+      const url = `/img/${kind}?${Date.now()}`;
+      if (!frame.querySelector("img")) {
+        frame.textContent = "";
+        frame.append(Object.assign(new Image(), {alt: kind + " frame", onload: drawScope}));
+      }
+      frame.querySelector("img").src = url;
+      if (kind === "source") {
+        $("orig").src = url; loaded = true;
+        srcLength = duration;
+        if (!cut[1] || cut[1] > duration) cut[1] = duration;
+        inputLut();
+        setVideo(duration && !/^https?:/.test(input.value.trim()) ? input.value.trim() : "", +time.value);
+      }
+      status.textContent = (duration ? `${clock(duration)} long` : "Still image")
+        + (samples > 1 ? ` · matching from ${samples} frames` : "");
+      preview();
+    } catch (e) { status.className = "status err"; status.textContent = e.message; }
+    frame.classList.remove("loading");
+    persist();
+  };
+  const fresh = () => { time.value = 0; label(); if (kind === "source") cut = [0, 0]; load(); };
+  input.addEventListener("change", fresh);
+  $(kind + "-browse").onclick = async () => {
+    const {path} = await (await post("/api/pick", {})).json();
+    if (path) { input.value = path; fresh(); }
+  };
+  time.addEventListener("input", label);
+  time.addEventListener("change", load);
+  $(kind + "-sample").addEventListener("change", load);
+  return {load, label};
+}
+const inputs = {source: setupInput("source"), reference: setupInput("reference")};
+$("input-lut").addEventListener("change", inputs.source.load);
+$("match-here").onclick = () => { $("source-time").value = head; inputs.source.label(); inputs.source.load(); };
+$("input-lut-browse").onclick = async () => {
+  const {path} = await (await post("/api/pick", {lut: true})).json();
+  if (path) { $("input-lut").value = path; inputs.source.load(); }
+};
+
+// ---- save
+$("save").onclick = async () => {
+  const status = $("save-status");
+  status.className = "status";
+  status.textContent = "Saving…";
+  // Resolve's LUT folder belongs to another app, so macOS may hold the save until you allow it.
+  const nudge = setTimeout(() => status.textContent = "Waiting on macOS: look for a dialog asking to access data from other apps, and click Allow.", 2500);
+  try {
+    const {path} = await (await post("/api/save", {...params(), name: $("lut-name").value})).json();
+    status.textContent = `Saved as Grade/${path.split("/").pop()}. In Resolve, right-click the LUTs panel and choose Refresh`
+      + ($("input-lut").value.trim() ? ", then put it on a node after your input LUT." : ".");
+    status.title = path;
+  } catch (e) { status.className = "status err"; status.textContent = e.message; }
+  clearTimeout(nudge);
+};
+for (const id of ["lut-name", "export-name", "export-size"]) $(id).addEventListener("change", () => persist());
+
+// ---- timeline: each clip keeps its own cut, grade (baked to a LUT by the server) and settings
+let clips = [], selected = null;
+const fail = (el, e) => { el.className = "status err"; el.textContent = e.message; };
+function drawClips() {
+  $("clips").textContent = "";
+  clips.forEach((c, i) => {
+    const el = document.createElement("div");
+    el.className = "clip" + (c.id === selected ? " sel" : "");
+    el.innerHTML = `<button class="thumb"><img src="/clip/${c.id}.jpg?${c.v}" alt="Clip ${i + 1}"></button>
+      <div><span>${i + 1} · ${stamp(c.end - c.start)}</span><button class="quiet" aria-label="Move earlier">‹</button><button class="quiet" aria-label="Move later">›</button><button class="quiet" aria-label="Remove clip">×</button></div>`;
+    const [open, earlier, later, remove] = el.querySelectorAll("button");
+    open.title = `${c.input}\n${stamp(c.start)} – ${stamp(c.end)}\nClick to edit`;
+    open.onclick = () => { selected = c.id; drawClips(); restore(c.state); };
+    const move = j => { if (clips[j]) { clips.splice(j, 0, clips.splice(i, 1)[0]); drawClips(); persist(); } };
+    earlier.onclick = () => move(i - 1);
+    later.onclick = () => move(i + 1);
+    remove.onclick = () => {
+      clips.splice(i, 1);
+      if (selected === c.id) selected = null;
+      post("/api/clip/remove", {id: c.id});
+      drawClips(); persist();
+    };
+    $("clips").append(el);
+  });
+  $("clips-note").textContent = clips.length
+    ? `${clips.length} clip${clips.length > 1 ? "s" : ""} · ${stamp(clips.reduce((sum, c) => sum + c.end - c.start, 0))}` : "";
+  $("clip-update").hidden = !selected;
+}
+async function addClip(id) {
+  const status = $("export-status");
+  status.className = "status";
+  try {
+    if (!loaded || cut[1] <= cut[0]) throw new Error("Load a video in step 1 first (stills cannot be clips).");
+    const got = (await (await post("/api/clip", {...params(), input_lut: $("input-lut").value, id})).json()).id;
+    const clip = {id: got, v: Date.now(), input: $("source-input").value.trim(), start: cut[0], end: cut[1], state: snapshot()};
+    const at = clips.findIndex(c => c.id === id);
+    if (at < 0) clips.push(clip); else clips[at] = clip;
+    selected = got;
+    status.textContent = "";
+    drawClips(); persist();
+  } catch (e) { fail(status, e); }
+}
+$("clip-add").onclick = () => addClip();
+$("clip-update").onclick = () => addClip(selected);
+
+// ---- export: the server renders in the background; poll it for progress
+async function pollExport() {
+  const s = await (await fetch("/api/export")).json(), running = s.state === "running";
+  $("export").textContent = running ? "Cancel" : "Export video";
+  $("export").classList.toggle("primary", !running);
+  $("export-status").className = "status" + (s.state === "error" ? " err" : "");
+  $("export-status").textContent = running ? `${s.text} · ${Math.round(s.progress * 100)}%`
+    : s.state === "done" ? `Exported to ${s.text}` : s.text;
+  if (running) setTimeout(pollExport, 1000);
+}
+$("export").onclick = async () => {
+  try {
+    if ($("export").textContent === "Cancel") return await post("/api/export/cancel", {});
+    if (!clips.length) throw new Error("Add a clip to the timeline first.");
+    await post("/api/export", {clips: clips.map(({id, input, start, end}) => ({id, input, start, end})),
+                               name: $("export-name").value, hd: $("export-size").value === "hd"});
+    pollExport();
+  } catch (e) { fail($("export-status"), e); }
+};
+
+// ---- remember the session in this browser
+const TEXT = ["source-input", "input-lut", "reference-input", "source-sample", "reference-sample"];  // belong to a clip
+const APP_TEXT = ["lut-name", "export-name", "export-size"];
+function snapshot() {
+  const s = {sliders: {}, text: {}, time: {}, cut: [...cut]};
+  for (const [, key] of SLIDERS) s.sliders[key] = $(key).value;
+  for (const id of TEXT) s.text[id] = $(id).value;
+  for (const kind of ["source", "reference"]) s.time[kind] = [$(kind + "-time").max, $(kind + "-time").value];
+  return s;
+}
+function persist() {
+  const s = {...snapshot(), mode: viewer.dataset.mode, split: viewer.style.getPropertyValue("--split"), app: {}, clips, selected};
+  for (const id of APP_TEXT) s.app[id] = $(id).value;
+  try { localStorage.setItem("grade", JSON.stringify(s)); } catch {}
+}
+async function restore(s) {
+  for (const [, key] of SLIDERS) if (key in s.sliders) { $(key).value = s.sliders[key]; shows[key](); }
+  for (const id of TEXT) if (id in s.text) $(id).value = s.text[id];
+  for (const kind of ["source", "reference"]) {
+    const [max, value] = s.time[kind];
+    $(kind + "-time").max = max; $(kind + "-time").value = value;
+    inputs[kind].label();
+  }
+  cut = [...(s.cut || [0, 0])];
+  await inputs.source.load();
+  await inputs.reference.load();
+}
+(async () => {
+  let s = null;
+  try { s = JSON.parse(localStorage.getItem("grade")); } catch {}
+  setMode(s?.mode || "split");
+  pollExport();
+  if (!s) return;
+  if (s.split) viewer.style.setProperty("--split", s.split);
+  for (const id of APP_TEXT) if (id in (s.app || s.text)) $(id).value = (s.app || s.text)[id];
+  clips = s.clips || []; selected = s.selected || null;
+  drawClips();
+  await restore(s);
+})();
+</script>
+</body>
+</html>
