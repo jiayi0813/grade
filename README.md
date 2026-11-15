@@ -54,7 +54,9 @@ skip Resolve altogether.
 2. **Reference**: paste a YouTube link or file path and pick the frame whose look you want.
 3. **Match**: two strengths, one for brightness/contrast and one for colour.
 4. **Look**: exposure, contrast, fade, saturation, temperature, tint, and shadow/highlight tints,
-   applied after the match. **Texture** adds denoise and film grain to exported video; a saved
+   applied after the match. Every heading in the side panel folds its part away; a dot marks
+   a part holding a slider that is off its default.
+   **Texture** (its own section) adds denoise and film grain to exported video; a saved
    LUT cannot carry them. Grain shows in the preview. To judge denoise, switch the preview to
    **Close-up**: it shows one spot of the current frame at full size, rendered by the exporter
    with and without denoise (about 1.6 s per update on the 4K test clip). Drag to look elsewhere.
@@ -69,10 +71,18 @@ skip Resolve altogether.
 6. **Audio** (optional): **Add audio** puts a music or sound file under the clips as its own
    track. Drag it sideways to move it in time; dragged past the start, its beginning is
    skipped. Under the timeline every track, and the clips' own sound ("Video sound"), has a
-   volume slider. Tracks are cut off where the video ends.
-7. **Export video**: renders the timeline to `~/Movies/Grade/<name>.mp4` (10-bit HEVC with
+   volume slider. Tracks are cut off where the video ends. **Loop**, next to a track's slider,
+   repeats that track until the end of the timeline (for music shorter than the video).
+7. **Titles and pictures** (optional): **Add text** or **Add image** puts an overlay on the
+   timeline at the playhead, as a row above the clips. Drag the row to move it, its right
+   edge to change how long it shows. In the preview, click an overlay to pick it and drag it
+   into place. The editor under the timeline sets the text, font, size, colour, opacity,
+   outline, shadow, background box (or round corners for a picture), start, length and fade;
+   Title, Lower third and Subtitle are one-click styles. Overlays show while the timeline is
+   in the preview, and are not part of a saved LUT.
+8. **Export video**: renders the timeline to `~/Movies/Grade/<name>.mp4` (10-bit HEVC with
    audio). An existing file is never overwritten; a number is added to the name.
-8. **Save LUT** (the Resolve route): writes `<name>.cube` into a `Grade` subfolder of Resolve's LUT folder. In
+9. **Save LUT** (the Resolve route): writes `<name>.cube` into a `Grade` subfolder of Resolve's LUT folder. In
    Resolve, right-click the LUTs panel (Color page) and choose Refresh. If an input LUT was
    used, put the saved LUT on a node after it.
 
@@ -125,6 +135,8 @@ All work is done in Oklab, on display-referred (Rec.709/sRGB) pixel values.
 | `POST /api/closeup`, `GET /closeup/before.png`, `/closeup/after.png` | Renders three frames at the playhead with the GPU exporter, with and without denoise, and serves a full-size crop of each. |
 | `GET /video/source` | The current local source file, with byte ranges, for the page's player. |
 | `POST /api/timeline`, `GET /video/t<n>`, `/video/a<n>`, `GET /clip/<id>.lut` | Timeline playback: registers the clips' and audio tracks' files so the page may play them, and serves each clip's baked LUT as float32 rows. |
+| `POST /api/image`, `GET /video/i<key>` | Checks a file is a picture and lets the page load it for an overlay. |
+| `POST /api/size` | The size an export will have, so the page can draw overlays at that size. |
 | `POST /api/audio` | Checks a file has sound and returns its length, for a new audio track. |
 | `POST /api/lut`, `/api/cube` | The grade, or an input LUT file, as raw float32 rows for the player's shader. |
 
@@ -158,7 +170,14 @@ All work is done in Oklab, on display-referred (Rec.709/sRGB) pixel values.
   element started and stopped with the timeline and nudged up to 10% faster or slower to stay
   in step (measured: typically within 10 ms, 43 ms at worst). At export, after the clips are
   joined, one more `ffmpeg` pass copies the video and mixes the sound (`adelay`, `volume`,
-  `amix` without normalising, then a limiter in case the sum would clip).
+  `amix` without normalising, then a limiter in case the sum would clip). A looped track is
+  read with `-stream_loop -1` and ends with the video; in playback its `<audio>` has `loop` set.
+- **Overlays**: the page draws each title or picture on a canvas with one function, for the
+  preview and, at the export's size, as a transparent PNG sent with the export request. The
+  exporters only lay those PNGs over the video after grade and grain, between their start and
+  end with a linear fade (Core Image in `lutexport`; `overlay` and `fade` filters in the ffmpeg
+  path), so preview and export cannot drift apart in layout. An overlay that spans a cut is
+  given to both clips with times counted from each clip's start.
 - **Clips**: the timeline lives in the page (`localStorage`); the server only holds each
   clip's baked LUT. With an input LUT, both are folded into one 64³ LUT (the GPU exporter's
   limit), because every LUT pass costs render time.
@@ -199,12 +218,14 @@ All work is done in Oklab, on display-referred (Rec.709/sRGB) pixel values.
 - **Grain makes files much larger** (it cannot be compressed away), and the encoder softens fine
   grain: below about 50% at size 1 little survives. Denoise can smooth faint real texture
   that barely moves.
-- **Editing is cuts only.** No transitions or titles. Audio is one volume per track: no fades,
+- **Editing is cuts only.** No transitions. Titles do not animate beyond fading. Audio is one volume per track: no fades,
   no per-clip levels, no trimming a track's end, and volume cannot go above 100%. Cut points
   snap to 0.1 s.
 - **Timeline playback is a preview, not the export.** Cuts pause for about 0.1 s, each clip is
-  shown at its own shape (the export fits all to the first clip's), denoise is not shown,
-  and web-link clips are skipped.
+  shown at its own shape (the export fits all to the first clip's, so overlays sit differently
+  over a clip of another shape), denoise is not shown, and web-link clips are skipped.
+- **Title fonts are the Mac's own**, chosen from a fixed list. In the ffmpeg path a fade that is
+  under way at a cut restarts from zero in the next clip.
 - **Matching is statistical.** It works when the two shots have broadly similar content. With
   different content it over-corrects (in testing, a colour match turned red sleeves brownish);
   lower the Colour strength.
@@ -244,14 +265,23 @@ All work is done in Oklab, on display-referred (Rec.709/sRGB) pixel values.
   started at 1.505 s; levels matched the sliders to three decimals, alone and mixed; a track
   dragged 3 s past the start began 3 s in; the clips' own sound at 25% measured 0.249 of the
   original; the video stream was unchanged. Dragging, sliders, removal and reload were checked
-  in the page.
+  in the page. A looped 2 s test sound (WAV, MP3 and M4A) repeated every 2 s to the end of a
+  9 s export, within 0.01 s, also when dragged past the start; in playback it kept repeating
+  across three repeats, within 0.12 s of the picture.
+
+- **Overlays**: on a grey test clip, both engines put an opaque, a half-transparent and a
+  fading overlay within 2 of 255 of the expected colours, in the right place, including one
+  spanning a cut. From the page, a title with a background box and a picture with rounded
+  corners were exported at 1080p and 4K; six spots of the exported frame were within 2 of 255
+  of the same spots in the preview. Text edits, the three styles, opacity, fades, dragging in
+  the preview and on the timeline, typed times, removal and reload were each checked.
 
 ## Not yet verified
 
 - The player in Safari and Chrome. It was tested in one Chromium-based browser; it needs
   WebGL2 and, for the DJI clips, HEVC playback, which both should have on a Mac.
 - Loading a saved LUT inside Resolve and checking it matches the preview.
-- The Browse and Add audio buttons (they open a native dialog that the automated tests could
+- The Browse, Add audio and Add image buttons (they open a native dialog that the automated tests could
   not click), and how timeline playback sounds: its timing was measured, but nobody listened.
 - Real footage other than one DJI Osmo Action 6 D-LogM clip (the other test clips were
   generated test patterns), and any HDR footage.

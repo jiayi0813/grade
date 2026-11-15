@@ -3,6 +3,8 @@
 
   .venv/bin/python app.py     then open http://127.0.0.1:8791
 """
+import base64
+import hashlib
 import io
 import json
 import mimetypes
@@ -183,13 +185,16 @@ def mix(joined, out, tracks, volume):
     """Copy the joined video to `out`, its own sound at `volume`, with the audio tracks mixed in.
 
     A track starts `at` seconds into the timeline; a negative `at` skips that much of its start.
+    A track with `loop` set repeats until the video ends.
     """
     level = lambda v: min(1, max(0, float(v)))
     cmd, graph = ["ffmpeg", "-v", "error", "-y", "-i", joined], [f"[0:a]volume={level(volume)}[a0]"]
     for n, t in enumerate(tracks, 1):
         at = float(t["at"])
-        cmd += [*(["-ss", str(-at)] if at < 0 else []), "-i", str(Path(t["path"]).expanduser())]
-        delay = f"adelay={round(at * 1000)}:all=1," if at > 0 else ""
+        loop = bool(t.get("loop"))
+        # a looped file is skipped into with a filter: -ss would apply to every repeat
+        cmd += [*(["-stream_loop", "-1"] if loop else ["-ss", str(-at)] if at < 0 else []), "-i", str(Path(t["path"]).expanduser())]
+        delay = f"adelay={round(at * 1000)}:all=1," if at > 0 else f"atrim=start={-at},asetpts=PTS-STARTPTS," if at < 0 and loop else ""
         graph.append(f"[{n}:a:0]aformat=sample_rates=48000:channel_layouts=stereo,{delay}volume={level(t['volume'])}[a{n}]")
     # as long as the video; levels as set, with a limiter in case the sum would clip
     graph.append("".join(f"[a{n}]" for n in range(len(tracks) + 1))
@@ -214,12 +219,35 @@ def timeline_files(inputs, audio):
         if src not in paths:
             paths.append(src)
         keys.append(paths.index(src))
-    for k in [k for k in playable if k != "source"]:
+    for k in [k for k in playable if k[0] in "ta"]:
         del playable[k]
     playable.update({f"t{n}": path for n, path in enumerate(paths)})
     sounds = [str(Path(a).expanduser()) for a in audio]
     playable.update({f"a{n}": path for n, path in enumerate(sounds) if Path(path).is_file()})
     return {"files": keys, "audio": [n if f"a{n}" in playable else None for n in range(len(sounds))]}
+
+
+def overlay_image(path):
+    """Let the page load a picture for an overlay: its /video/<key> and size."""
+    path = Path(path).expanduser()
+    if not path.is_file():
+        raise RuntimeError(f"File not found: {path}")
+    try:
+        with Image.open(path) as im:
+            size = im.size
+    except OSError:
+        raise RuntimeError("That file is not a picture this app can read")
+    key = "i" + hashlib.md5(str(path).encode()).hexdigest()[:8]
+    playable[key] = str(path)
+    return {"key": key, "width": size[0], "height": size[1]}
+
+
+def export_size(first, hd):
+    """(width, height, frame rate) of an export: the first clip sets them; `hd` caps the height at 1080."""
+    w, h, fps, _ = probe(resolve_input(first)[0])
+    if hd and h > 1080:
+        w, h = round(w * 1080 / h / 2) * 2, 1080
+    return w, h, fps
 
 
 def texture(c, h):
@@ -298,11 +326,13 @@ def encode(cmd, done, span, total):
         raise RuntimeError(err[-1] if err else f"{Path(cmd[0]).name} failed")
 
 
-def run_export(clips, name, hd, tracks=(), volume=1):
+def run_export(clips, name, hd, tracks=(), volume=1, overlays=()):
     """Render each clip through its LUT to matching 10-bit HEVC files, then join them.
 
     A clip may also ask for denoise (before the LUT) and film grain (after it), each 0 to 1.
     `tracks` are audio files mixed in over the whole timeline; `volume` is for the clips' own sound.
+    `overlays` are pictures the page drew at the export's size (titles and images), each shown from
+    `at` for `length` seconds of the timeline, fading in and out over `fade` seconds.
     """
     ffmpeg = ["ffmpeg", "-v", "error", "-y", "-nostats", "-progress", "pipe:1"]
     # every part gets the same time base, or parts made by different engines join with wrong timing
@@ -311,9 +341,7 @@ def run_export(clips, name, hd, tracks=(), volume=1):
     aac = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
     try:
         tool = gpu_tool()
-        w, h, fps, _ = probe(resolve_input(clips[0]["input"])[0])  # the first clip sets size and rate
-        if hd and h > 1080:
-            w, h = round(w * 1080 / h / 2) * 2, 1080
+        w, h, fps = export_size(clips[0]["input"], hd)
         total = sum(c["end"] - c["start"] for c in clips)
         EXPORT_DIR.mkdir(parents=True, exist_ok=True)
         shots = []  # per clip: ffmpeg input, seconds, LUT file, frame rate, has audio
@@ -323,6 +351,8 @@ def run_export(clips, name, hd, tracks=(), volume=1):
             src = resolve_input(c["input"])[0]
             shots.append((src, c["end"] - c["start"], f"{CLIP_DIR / c['id']}.cube", *probe(src)[2:]))
         with tempfile.TemporaryDirectory(dir=EXPORT_DIR, prefix=".rendering-") as tmp:
+            for n, o in enumerate(overlays):
+                Path(tmp, f"overlay{n}.png").write_bytes(base64.b64decode(o["png"].partition(",")[2]))
 
             def render(gpu):
                 done = 0
@@ -332,11 +362,14 @@ def run_export(clips, name, hd, tracks=(), volume=1):
                     export["text"] = f"Rendering clip {i + 1} of {len(clips)}"
                     cut = ["-ss", str(c["start"]), "-t", str(span), "-i", src]
                     denoise, grain, size = texture(c, h)
+                    # the overlays on screen during this clip, timed from the clip's own start
+                    over = [(f"{tmp}/overlay{n}.png", o["at"] - done, o["at"] + o["length"] - done, max(0, float(o.get("fade", 0))))
+                            for n, o in enumerate(overlays) if o["at"] < done + span and o["at"] + o["length"] > done]
                     # second input: the clip's audio, or silence, as every part needs an audio track to join
                     audio = cut if sound else ["-f", "lavfi", "-t", str(span), "-i", "anullsrc=r=48000:cl=stereo"]
                     if gpu:
                         encode([tool, src, str(c["start"]), str(span), lut, f"{tmp}/video.mov", str(w), str(h),
-                                str(denoise), str(grain), str(size)], done, span, total)
+                                str(denoise), str(grain), str(size), *(str(x) for o in over for x in o)], done, span, total)
                         encode([*ffmpeg, "-i", f"{tmp}/video.mov", *audio, "-map", "0:v:0", "-map", "1:a:0",
                                 "-c:v", "copy", *hevc, *aac, f"{tmp}/{i}.mp4"], done + span, 0, total)
                     else:
@@ -345,10 +378,19 @@ def run_export(clips, name, hd, tracks=(), volume=1):
                         grains = (f"[p];color=gray:s={round(w / size)}x{round(h / size)}:r={fps},format=gray,"
                                   f"noise=alls={round(35 * grain)}:allf=t,format=gray10le,scale={w}:{h}:flags=bilinear,"
                                   "format=gbrp10le[g];[p][g]blend=all_mode=softlight:shortest=1") if grain else ""
-                        encode([*ffmpeg, "-hwaccel", "videotoolbox", *cut, *audio, "-map", "0:v:0", "-map", "1:a:0",
-                                "-vf", f"{clean}scale={w}:{h}:force_original_aspect_ratio=decrease,setsar=1,fps={fps},"
-                                f"format=gbrp10le,lut3d=file='{lut}',pad={w}:{h}:-1:-1{grains},"
-                                "scale=out_color_matrix=bt709:out_range=tv,format=p010le",
+                        graph = (f"[0:v]{clean}scale={w}:{h}:force_original_aspect_ratio=decrease,setsar=1,fps={fps},"
+                                 f"format=gbrp10le,lut3d=file='{lut}',pad={w}:{h}:-1:-1{grains},"
+                                 "scale=out_color_matrix=bt709:out_range=tv,"
+                                 + ("format=yuv444p10le[v0]" if over else "format=p010le[v]"))
+                        pictures = []
+                        for k, (png, a, b, fade) in enumerate(over):  # fades are clamped to this clip's own time
+                            pictures += ["-framerate", fps, "-loop", "1", "-i", png]
+                            fades = ((f",fade=t=in:st={max(0, a)}:d={min(fade, a + fade)}:alpha=1" if a + fade > 0 else "")
+                                     + f",fade=t=out:st={max(0, b - fade)}:d={min(fade, b)}:alpha=1") if fade else ""
+                            graph += (f";[{k + 2}:v]scale={w}:{h}:out_color_matrix=bt709:out_range=tv,format=yuva444p10le{fades}[o{k}]"
+                                      f";[v{k}][o{k}]overlay=format=yuv444p10:enable='between(t,{a},{b})':shortest=1[v{k + 1}]")
+                        encode([*ffmpeg, "-hwaccel", "videotoolbox", *cut, *audio, *pictures, "-map", "[v]", "-map", "1:a:0",
+                                "-filter_complex", graph + (f";[v{len(over)}]format=p010le[v]" if over else ""),
                                 "-c:v", "hevc_videotoolbox", "-q:v", "55", *hevc, *aac, f"{tmp}/{i}.mp4"],
                                done, span, total)
                     done += span
@@ -450,7 +492,7 @@ class Handler(BaseHTTPRequestHandler):
         elif re.fullmatch(rf"/clip/{CLIP_ID}\.lut", path) and (CLIP_DIR / path[6:]).with_suffix(".cube").is_file():
             rows = grade.read_cube((CLIP_DIR / path[6:]).with_suffix(".cube")).transpose(2, 1, 0, 3)  # as /api/cube
             self.send(rows.astype("<f4").tobytes(), "application/octet-stream")
-        elif re.fullmatch(r"/video/(source|[ta]\d+)", path) and playable.get(path[7:]):
+        elif re.fullmatch(r"/video/(source|[ta]\d+|i[0-9a-f]{8})", path) and playable.get(path[7:]):
             self.send_video(playable[path[7:]])
         else:
             self.send({"error": "not found"}, code=404)
@@ -488,6 +530,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.send({"id": bake(p)})
             elif self.path == "/api/timeline":
                 self.send(timeline_files(p["inputs"], p.get("audio", ())))
+            elif self.path == "/api/image":
+                self.send(overlay_image(p["path"].strip()))
+            elif self.path == "/api/size":
+                w, h, _ = export_size(p["input"], p.get("hd", False))
+                self.send({"width": w, "height": h})
             elif self.path == "/api/audio":
                 self.send({"length": audio_length(p["path"].strip())})
             elif self.path == "/api/closeup":
@@ -503,7 +550,8 @@ class Handler(BaseHTTPRequestHandler):
                 name = re.sub(r"[^\w\- ]", "", p["name"]).strip() or "video"
                 job.clear()
                 export.update(state="running", progress=0, text="Starting")
-                threading.Thread(target=run_export, args=(p["clips"], name, p.get("hd", False), p.get("audio", ()), p.get("volume", 1)),
+                threading.Thread(target=run_export, args=(p["clips"], name, p.get("hd", False), p.get("audio", ()), p.get("volume", 1),
+                                                               p.get("overlays", ())),
                                  daemon=True).start()
                 self.send(export)
             elif self.path == "/api/export/cancel":

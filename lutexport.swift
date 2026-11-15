@@ -4,7 +4,10 @@
 // it. Built on demand by app.py:
 //   swiftc -O -swift-version 5 lutexport.swift -o lutexport
 //   lutexport input start duration lut.cube output.mov width height denoise grain grain-size
-// denoise and grain are strengths from 0 (off) to 1; grain-size is in output pixels.
+//             [overlay.png start end fade]...
+// denoise and grain are strengths from 0 (off) to 1; grain-size is in output pixels. Each overlay
+// is a picture the size of the output, laid over it from start to end (seconds from the start
+// of this stretch, which may lie outside it), fading in and out over fade seconds.
 import AVFoundation
 import CoreImage
 import VideoToolbox
@@ -12,9 +15,9 @@ import VideoToolbox
 func fail(_ msg: String) -> Never { FileHandle.standardError.write((msg + "\n").data(using: .utf8)!); exit(1) }
 
 let a = CommandLine.arguments
-guard a.count == 11, let start = Double(a[2]), let length = Double(a[3]), let w = Int(a[6]), let h = Int(a[7]),
+guard a.count >= 11, (a.count - 11) % 4 == 0, let start = Double(a[2]), let length = Double(a[3]), let w = Int(a[6]), let h = Int(a[7]),
       let denoise = Double(a[8]), let grain = Double(a[9]), let grainSize = Double(a[10]), grainSize > 0
-else { fail("usage: lutexport input start duration lut.cube output.mov width height denoise grain grain-size") }
+else { fail("usage: lutexport input start duration lut.cube output.mov width height denoise grain grain-size [overlay.png start end fade]...") }
 
 // ---- LUT: .cube rows are RGB with red fastest, which is the order Core Image wants (as RGBA)
 var size = 0
@@ -83,6 +86,15 @@ let speckle = CIColorKernel(source: """
     """)!
 let noise = CIFilter(name: "CIRandomGenerator")!.outputImage!
 
+// ---- overlays: titles and pictures drawn by the page, composited last so grade and grain leave them alone
+var overlays = [(image: CIImage, start: Double, end: Double, fade: Double)]()
+for i in stride(from: 11, to: a.count, by: 4) {
+    guard let image = CIImage(contentsOf: URL(fileURLWithPath: a[i]), options: [.colorSpace: NSNull()]),
+          let s = Double(a[i + 1]), let e = Double(a[i + 2]), let f = Double(a[i + 3]) else { fail("cannot read overlay \(a[i])") }
+    let size = image.extent.size  // made at the output's size; stretched to it if not
+    overlays.append((image.transformed(by: CGAffineTransform(scaleX: CGFloat(w) / size.width, y: CGFloat(h) / size.height)), s, e, f))
+}
+
 // ---- writer: hardware HEVC Main 10, tagged Rec.709
 let rec709 = [AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
               AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
@@ -136,6 +148,12 @@ func step() -> Bool {
         let patch = CGAffineTransform(translationX: -.random(in: 0...4000), y: -.random(in: 0...4000))
         let grains = noise.transformed(by: patch.concatenating(CGAffineTransform(scaleX: grainSize, y: grainSize)))
         image = speckle.apply(extent: canvas, arguments: [image, grains, grain * 0.1])!
+    }
+    let t = (time - from).seconds
+    for o in overlays where t >= o.start && t < o.end {
+        let alpha = o.fade > 0 ? min(1, (t - o.start) / o.fade, (o.end - t) / o.fade) : 1
+        let layer = alpha < 1 ? o.image.applyingFilter("CIColorMatrix", parameters: ["inputAVector": CIVector(x: 0, y: 0, z: 0, w: alpha)]) : o.image
+        image = layer.composited(over: image)
     }
     CVBufferSetAttachment(dst, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate)
     context.render(image, to: dst, bounds: canvas, colorSpace: nil)
