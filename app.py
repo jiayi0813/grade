@@ -181,6 +181,17 @@ def audio_length(path):
     return float(found[-1])
 
 
+# Mono sound goes to both speakers at full level, as a browser plays it. Left to itself, ffmpeg
+# lowers it by 3 dB when making it stereo, and the export would be quieter than the preview.
+BOTH = "pan=stereo|c0=c0|c1=c0"
+
+
+def mono(path):
+    """Whether a file's first audio stream has a single channel."""
+    return run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels",
+                "-of", "csv=p=0", str(path)]).strip() == b"1"
+
+
 def mix(joined, out, tracks, volume):
     """Copy the joined video to `out`, its own sound at `volume`, with the audio tracks mixed in.
 
@@ -193,9 +204,10 @@ def mix(joined, out, tracks, volume):
         at = float(t["at"])
         loop = bool(t.get("loop"))
         # a looped file is skipped into with a filter: -ss would apply to every repeat
-        cmd += [*(["-stream_loop", "-1"] if loop else ["-ss", str(-at)] if at < 0 else []), "-i", str(Path(t["path"]).expanduser())]
+        path = str(Path(t["path"]).expanduser())
+        cmd += [*(["-stream_loop", "-1"] if loop else ["-ss", str(-at)] if at < 0 else []), "-i", path]
         delay = f"adelay={round(at * 1000)}:all=1," if at > 0 else f"atrim=start={-at},asetpts=PTS-STARTPTS," if at < 0 and loop else ""
-        graph.append(f"[{n}:a:0]aformat=sample_rates=48000:channel_layouts=stereo,{delay}volume={level(t['volume'])}[a{n}]")
+        graph.append(f"[{n}:a:0]{BOTH + ',' if mono(path) else ''}aformat=sample_rates=48000:channel_layouts=stereo,{delay}volume={level(t['volume'])}[a{n}]")
     # as long as the video; levels as set, with a limiter in case the sum would clip
     graph.append("".join(f"[a{n}]" for n in range(len(tracks) + 1))
                  + f"amix=inputs={len(tracks) + 1}:duration=first:normalize=0,alimiter=limit=0.95:level=0[a]")
@@ -367,11 +379,12 @@ def run_export(clips, name, hd, tracks=(), volume=1, overlays=()):
                             for n, o in enumerate(overlays) if o["at"] < done + span and o["at"] + o["length"] > done]
                     # second input: the clip's audio, or silence, as every part needs an audio track to join
                     audio = cut if sound else ["-f", "lavfi", "-t", str(span), "-i", "anullsrc=r=48000:cl=stereo"]
+                    both = ["-af", BOTH] if sound and mono(src) else []
                     if gpu:
                         encode([tool, src, str(c["start"]), str(span), lut, f"{tmp}/video.mov", str(w), str(h),
                                 str(denoise), str(grain), str(size), *(str(x) for o in over for x in o)], done, span, total)
                         encode([*ffmpeg, "-i", f"{tmp}/video.mov", *audio, "-map", "0:v:0", "-map", "1:a:0",
-                                "-c:v", "copy", *hevc, *aac, f"{tmp}/{i}.mp4"], done + span, 0, total)
+                                "-c:v", "copy", *hevc, *both, *aac, f"{tmp}/{i}.mp4"], done + span, 0, total)
                     else:
                         # stand-ins for the GPU exporter's denoise and grain, tuned to about the same strength
                         clean = f"hqdn3d={6 * denoise}:{4.5 * denoise}:{9 * denoise}:{6.75 * denoise}," if denoise else ""
@@ -391,7 +404,7 @@ def run_export(clips, name, hd, tracks=(), volume=1, overlays=()):
                                       f";[v{k}][o{k}]overlay=format=yuv444p10:enable='between(t,{a},{b})':shortest=1[v{k + 1}]")
                         encode([*ffmpeg, "-hwaccel", "videotoolbox", *cut, *audio, *pictures, "-map", "[v]", "-map", "1:a:0",
                                 "-filter_complex", graph + (f";[v{len(over)}]format=p010le[v]" if over else ""),
-                                "-c:v", "hevc_videotoolbox", "-q:v", "55", *hevc, *aac, f"{tmp}/{i}.mp4"],
+                                "-c:v", "hevc_videotoolbox", "-q:v", "55", *hevc, *both, *aac, f"{tmp}/{i}.mp4"],
                                done, span, total)
                     done += span
 

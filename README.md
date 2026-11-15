@@ -97,10 +97,36 @@ skip Resolve altogether.
 | `START_APP.md` | How to start and stop the app, and what to do when something fails. |
 | `clips/` | Created on first use: one baked LUT and thumbnail per timeline clip. |
 | `requirements.txt` | Python packages: numpy, Pillow, `yt-dlp[default]`. Installed into `.venv/`. |
+| `tests/`, `requirements-dev.txt` | Automated tests (see Tests) and the one extra package they need, `pytest`. |
 
 External tools needed on the PATH: `ffmpeg`, `ffprobe`, and `node` (yt-dlp uses Node to solve
 YouTube's challenges). `swiftc` (Xcode Command Line Tools) is optional: without it export
-falls back to ffmpeg alone, about 3.5 times slower at 4K. There are no automated tests.
+falls back to ffmpeg alone, about 3.5 times slower at 4K.
+
+## Tests
+
+```bash
+.venv/bin/pip install -r requirements-dev.txt
+```
+
+```bash
+.venv/bin/python -m pytest tests -q
+```
+
+About 20 seconds. The tests make their own small clips and sounds with `ffmpeg`, export them
+into a temporary folder, and measure the result; they do not read your footage or write to
+`~/Movies/Grade` or `clips/`, and the app does not need to be running.
+
+- `test_audio.py`: the sound mix. Each source is a tone of its own pitch, so its level in the
+  export can be read on its own: volumes (0% is silent), start position, a track dragged past
+  the start, looping, the mix's length, mono files, and the limiter.
+- `test_export.py`: whole exports, each run on both engines (GPU and `ffmpeg`): size, frame
+  rate, frame count, colour through a LUT that changes nothing, clips stored turned 90°, 180°
+  and 270°, joined clips, and overlays (timing, fades, transparency, across a cut).
+- `test_lut.py`: the grade maths and `.cube` files.
+
+Not covered: the page itself (dragging, playback, the preview's sync), the colour match,
+web links, and the native file dialogs.
 
 ## How the colour maths works (`grade.py`)
 
@@ -172,6 +198,8 @@ All work is done in Oklab, on display-referred (Rec.709/sRGB) pixel values.
   joined, one more `ffmpeg` pass copies the video and mixes the sound (`adelay`, `volume`,
   `amix` without normalising, then a limiter in case the sum would clip). A looped track is
   read with `-stream_loop -1` and ends with the video; in playback its `<audio>` has `loop` set.
+  Mono sound, a track's or a clip's own, goes to both channels at full level (`pan`), as the
+  browser plays it; `ffmpeg`'s own conversion to stereo would lower it by 3 dB.
 - **Overlays**: the page draws each title or picture on a canvas with one function, for the
   preview and, at the export's size, as a transparent PNG sent with the export request. The
   exporters only lay those PNGs over the video after grade and grain, between their start and
