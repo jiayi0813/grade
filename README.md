@@ -66,9 +66,13 @@ skip Resolve altogether.
    **Play timeline** plays the assembled clips in the preview, each through its own grade;
    click or drag on the ruler to move along it (Space and the arrow keys work there too).
    Touching the editing controls returns the preview to the clip being edited.
-6. **Export video**: renders the timeline to `~/Movies/Grade/<name>.mp4` (10-bit HEVC with
+6. **Audio** (optional): **Add audio** puts a music or sound file under the clips as its own
+   track. Drag it sideways to move it in time; dragged past the start, its beginning is
+   skipped. Under the timeline every track, and the clips' own sound ("Video sound"), has a
+   volume slider. Tracks are cut off where the video ends.
+7. **Export video**: renders the timeline to `~/Movies/Grade/<name>.mp4` (10-bit HEVC with
    audio). An existing file is never overwritten; a number is added to the name.
-7. **Save LUT** (the Resolve route): writes `<name>.cube` into a `Grade` subfolder of Resolve's LUT folder. In
+8. **Save LUT** (the Resolve route): writes `<name>.cube` into a `Grade` subfolder of Resolve's LUT folder. In
    Resolve, right-click the LUTs panel (Color page) and choose Refresh. If an input LUT was
    used, put the saved LUT on a node after it.
 
@@ -120,7 +124,8 @@ All work is done in Oklab, on display-referred (Rec.709/sRGB) pixel values.
 | `GET /api/export` | Export state and progress; the page polls it every second. |
 | `POST /api/closeup`, `GET /closeup/before.png`, `/closeup/after.png` | Renders three frames at the playhead with the GPU exporter, with and without denoise, and serves a full-size crop of each. |
 | `GET /video/source` | The current local source file, with byte ranges, for the page's player. |
-| `POST /api/timeline`, `GET /video/t<n>`, `GET /clip/<id>.lut` | Timeline playback: registers the clips' files so the page may play them, and serves each clip's baked LUT as float32 rows. |
+| `POST /api/timeline`, `GET /video/t<n>`, `/video/a<n>`, `GET /clip/<id>.lut` | Timeline playback: registers the clips' and audio tracks' files so the page may play them, and serves each clip's baked LUT as float32 rows. |
+| `POST /api/audio` | Checks a file has sound and returns its length, for a new audio track. |
 | `POST /api/lut`, `/api/cube` | The grade, or an input LUT file, as raw float32 rows for the player's shader. |
 
 - **State is in memory**: the current frames, their statistics and resolved stream links.
@@ -149,6 +154,11 @@ All work is done in Oklab, on display-referred (Rec.709/sRGB) pixel values.
   before the cut, with its speed trimmed so it reaches its In point as the cut arrives (a
   paused player takes a few tenths of a second to get going). Measured on a four-clip, two-file
   timeline: each cut cost about 0.1 s and the incoming clip started within two frames of its In.
+- **Audio tracks**: kept in the page with the timeline. In playback each track is an `<audio>`
+  element started and stopped with the timeline and nudged up to 10% faster or slower to stay
+  in step (measured: typically within 10 ms, 43 ms at worst). At export, after the clips are
+  joined, one more `ffmpeg` pass copies the video and mixes the sound (`adelay`, `volume`,
+  `amix` without normalising, then a limiter in case the sum would clip).
 - **Clips**: the timeline lives in the page (`localStorage`); the server only holds each
   clip's baked LUT. With an input LUT, both are folded into one 64³ LUT (the GPU exporter's
   limit), because every LUT pass costs render time.
@@ -189,8 +199,9 @@ All work is done in Oklab, on display-referred (Rec.709/sRGB) pixel values.
 - **Grain makes files much larger** (it cannot be compressed away), and the encoder softens fine
   grain: below about 50% at size 1 little survives. Denoise can smooth faint real texture
   that barely moves.
-- **Editing is cuts only.** No transitions, titles, audio levels or music. Cut points snap
-  to 0.1 s.
+- **Editing is cuts only.** No transitions or titles. Audio is one volume per track: no fades,
+  no per-clip levels, no trimming a track's end, and volume cannot go above 100%. Cut points
+  snap to 0.1 s.
 - **Timeline playback is a preview, not the export.** Cuts pause for about 0.1 s, each clip is
   shown at its own shape (the export fits all to the first clip's), denoise is not shown,
   and web-link clips are skipped.
@@ -229,12 +240,19 @@ All work is done in Oklab, on display-referred (Rec.709/sRGB) pixel values.
   time; playing through never ran backwards and stopped at the end; pause and resume,
   ruler drag, keys, reorder, remove, zoom and a web-link clip (skipped) were each checked.
 
+- **Audio tracks**: exports with generated tones were measured: a track set to start at 1.5 s
+  started at 1.505 s; levels matched the sliders to three decimals, alone and mixed; a track
+  dragged 3 s past the start began 3 s in; the clips' own sound at 25% measured 0.249 of the
+  original; the video stream was unchanged. Dragging, sliders, removal and reload were checked
+  in the page.
+
 ## Not yet verified
 
 - The player in Safari and Chrome. It was tested in one Chromium-based browser; it needs
   WebGL2 and, for the DJI clips, HEVC playback, which both should have on a Mac.
 - Loading a saved LUT inside Resolve and checking it matches the preview.
-- The Browse buttons (they open a native dialog that the automated tests could not click).
+- The Browse and Add audio buttons (they open a native dialog that the automated tests could
+  not click), and how timeline playback sounds: its timing was measured, but nobody listened.
 - Real footage other than one DJI Osmo Action 6 D-LogM clip (the other test clips were
   generated test patterns), and any HDR footage.
 

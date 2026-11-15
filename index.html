@@ -170,6 +170,14 @@
   .block.sel { border-color:#ececec; box-shadow:0 0 0 1px #ececec; }
   .block span { position:absolute; left:3px; bottom:3px; padding:0 4px; border-radius:3px; background:#000b; color:#eee; font-size:10px; white-space:nowrap;
                 font-variant-numeric:tabular-nums; }
+  .sound { position:relative; height:22px; margin-top:4px; overflow:hidden; }
+  .sound button { position:absolute; top:0; height:100%; padding:0 6px; border:1px solid #2c5a49; border-radius:4px; background:#18342a; color:#cfeee0;
+                  font-size:10px; text-align:left; white-space:nowrap; overflow:hidden; cursor:grab; touch-action:none; }
+  .mixer { display:flex; flex-wrap:wrap; gap:6px 20px; font-size:12px; color:var(--dim); }
+  .mixer label { display:flex; align-items:center; gap:8px; }
+  .mixer .name { max-width:170px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .mixer input[type=range] { flex:none; width:110px; }
+  .mixer .val { width:34px; font-variant-numeric:tabular-nums; }
   .lane .head { position:absolute; top:0; bottom:0; left:var(--at, 0px); width:2px; margin-left:-1px; background:#fff; box-shadow:0 0 0 1px #000a;
                 pointer-events:none; }
   .viewer.timeline canvas { display:block; }
@@ -266,13 +274,14 @@
       <div class="bar">
         <span class="title">Timeline</span><span class="note" id="clips-note"></span>
         <button id="tl-play" disabled title="Play the assembled clips">Play timeline</button><span class="time" id="tl-time">0:00.0 / 0:00.0</span>
-        <button id="clip-add">Add clip</button><button id="clip-update" hidden>Update selected</button>
+        <button id="clip-add">Add clip</button><button id="audio-add" disabled title="Add a music or sound file under the clips">Add audio</button><button id="clip-update" hidden>Update selected</button>
         <span id="clip-tools" hidden><button class="quiet" id="clip-earlier" title="Move the selected clip earlier">‹</button><button class="quiet" id="clip-later" title="Move the selected clip later">›</button><button class="quiet" id="clip-remove" title="Remove the selected clip">×</button></span>
         <label>Zoom</label><button id="tl-zoom-out" aria-label="Zoom the timeline out">−</button><button id="tl-zoom-in" aria-label="Zoom the timeline in">+</button>
         <select id="export-size" aria-label="Export size"><option value="full">Original size</option><option value="hd">1080p</option></select>
         <input type="text" id="export-name" value="my video" aria-label="Export file name"><button class="primary" id="export">Export video</button>
       </div>
-      <div class="clips none" id="clips"><div class="lane" id="lane"><div class="ruler" id="ruler" title="Click or drag to move along the timeline"></div><div class="track" id="track"></div><div class="head"></div></div></div>
+      <div class="clips none" id="clips"><div class="lane" id="lane"><div class="ruler" id="ruler" title="Click or drag to move along the timeline"></div><div class="track" id="track"></div><div id="sounds"></div><div class="head"></div></div></div>
+      <div class="mixer" id="mixer"></div>
       <div class="status" id="export-status"></div>
     </div>
   </main>
@@ -768,6 +777,8 @@ function drawClips() {
   $("clips-note").textContent = clips.length ? `${clips.length} clip${clips.length > 1 ? "s" : ""}` : "";
   $("clip-update").hidden = $("clip-tools").hidden = !selected;
   $("tl-play").disabled = !clips.length || !gl;
+  $("audio-add").disabled = !clips.length;
+  drawAudio();
   showTimeline();
 }
 function moveClip(by) {  // -1 earlier, 1 later, 0 remove
@@ -788,6 +799,83 @@ for (const [id, factor] of [["tl-zoom-in", 2], ["tl-zoom-out", 0.5]]) $(id).oncl
   $("clips").scrollLeft = tl.at * pps - $("clips").clientWidth / 2;
 };
 addEventListener("resize", drawClips);
+
+// ---- audio tracks: sound files laid under the clips, each with its own volume, mixed in at export.
+// `at` is where a track starts on the timeline; below zero, that much of its beginning is skipped.
+let audio = [], videoVolume = 1;  // audio: {path, at, length, volume}
+function drawAudio() {
+  const all = total();
+  $("sounds").textContent = $("mixer").textContent = "";
+  const fader = (name, title, value, set, remove) => {
+    const el = document.createElement("label");
+    el.innerHTML = `<span class="name"></span><input type="range" min="0" max="1" step="0.01"><span class="val"></span>`
+      + (remove ? `<button class="quiet" aria-label="Remove this audio track">×</button>` : "");
+    const [label, input, val] = el.children;
+    label.textContent = name; label.title = title; input.value = value;
+    input.setAttribute("aria-label", "Volume of " + name);
+    const show = () => val.textContent = pct(+input.value);
+    input.oninput = () => { set(+input.value); show(); persist(); syncSound(); };
+    if (remove) el.lastChild.onclick = e => { e.preventDefault(); remove(); };
+    show();
+    $("mixer").append(el);
+  };
+  if (clips.length) fader("Video sound", "The clips' own sound", videoVolume, x => videoVolume = x);
+  audio.forEach((a, i) => {
+    const name = a.path.split("/").pop(), row = document.createElement("div"), block = document.createElement("button");
+    fader("♪ " + name, a.path, a.volume, x => a.volume = x, () => { audio.splice(i, 1); drawClips(); persist(); });
+    const place = () => {
+      block.style.left = Math.max(0, a.at) * pps + "px";
+      block.style.width = Math.max(3, (Math.min(all, a.at + a.length) - Math.max(0, a.at)) * pps) + "px";
+      block.textContent = "♪ " + name + (a.at < 0 ? ` · from ${stamp(-a.at)}` : "");
+    };
+    block.title = `${a.path}\nDrag to move it in time`;
+    block.onpointerdown = e => {
+      const from = e.clientX, was = a.at;
+      block.setPointerCapture(e.pointerId);
+      block.onpointermove = m => {  // some of it must stay inside the timeline
+        a.at = Math.round(Math.min(all - 0.1, Math.max(0.1 - a.length, was + (m.clientX - from) / pps)) * 10) / 10;
+        place(); syncSound();
+      };
+      block.onpointerup = () => { block.onpointermove = block.onpointerup = null; persist(); };
+    };
+    row.className = "sound";
+    place();
+    row.append(block);
+    $("sounds").append(row);
+  });
+}
+async function addAudio(path) {
+  const status = $("export-status");
+  status.className = "status";
+  try {
+    const {length} = await (await post("/api/audio", {path})).json();
+    audio.push({path, at: 0, length, volume: 1});
+    status.textContent = "";
+    drawClips(); persist();
+  } catch (e) { fail(status, e); }
+}
+$("audio-add").onclick = async () => {
+  const {path} = await (await post("/api/pick", {})).json();
+  if (path) addAudio(path);
+};
+// While the timeline plays, one <audio> per track is kept in step with it: started and stopped
+// with it, and nudged faster or slower when the picture pauses at a cut and the two drift apart.
+const sounds = [];
+function syncSound() {
+  const playing = tl.on && !tvideo.paused;
+  if (tl.on) tvideo.volume = videoVolume;
+  audio.forEach((a, i) => {
+    const el = sounds[i] ||= new Audio(), want = tl.at - a.at, n = tl.sound?.[i];
+    const url = n == null ? "" : "/video/a" + n;
+    if (el.dataset.url !== url) { el.dataset.url = url; if (url) el.src = url + "?" + Date.now(); }
+    el.volume = a.volume;
+    if (!url || !playing || want < 0 || want >= a.length) return el.pause();
+    const off = el.currentTime - want;
+    if (el.paused || (Math.abs(off) > 0.5 && !el.seeking && el.readyState > 2)) { el.currentTime = want; el.playbackRate = 1; el.play().catch(() => {}); }
+    else el.playbackRate = Math.min(1.1, Math.max(0.9, 1 - off));
+  });
+  for (const el of sounds.slice(audio.length)) el.pause();
+}
 
 // ---- timeline playback: the assembled clips, each through its own baked LUT, in players of
 // their own. One shows; the other is cued to the next clip ahead of time, so a cut does not
@@ -824,6 +912,7 @@ function showTimeline() {
   $("tl-time").textContent = `${stamp(tl.at)} / ${stamp(total())}`;
   $("tl-play").textContent = tl.on && !tvideo.paused ? "Pause" : "Play timeline";
   if (tl.on) $("tl-tag").textContent = `Timeline · clip ${tl.clip + 1} of ${clips.length}`;
+  syncSound();
 }
 function leaveTimeline() {  // back to the clip being edited, with its LUTs in the shader again
   if (!tl.on) return;
@@ -843,8 +932,9 @@ async function cue(at, play) {
   tl.busy = true;
   try {
     if (!tl.files) {
-      tl.files = (await (await post("/api/timeline", {inputs: clips.map(c => c.input)})).json()).files;
-      for (const p of players) p.dataset.url = "";  // the server's file numbers may have changed
+      const got = await (await post("/api/timeline", {inputs: clips.map(c => c.input), audio: audio.map(a => a.path)})).json();
+      [tl.files, tl.sound] = [got.files, got.audio];
+      for (const p of [...players, ...sounds]) p.dataset.url = "";  // the server's file numbers may have changed
     }
     if (run !== tl.run) return;
     const begin = starts(), all = total();
@@ -864,7 +954,7 @@ async function cue(at, play) {
     if (run !== tl.run) return;
     if (!ok) { tl.files[i] = null; tvideo.dataset.url = ""; return cue(begin[i + 1] ?? all, play); }
     standby();
-    tvideo.volume = 1;
+    tvideo.volume = videoVolume;
     tvideo.playbackRate = 1;
     if (play) await tvideo.play(); else tvideo.pause();
     status.textContent = "";
@@ -890,7 +980,7 @@ function timelineTick(player) {  // runs for every frame a timeline player shows
       else if (ready) {  // cut to the player that is waiting
         tvideo.pause();
         tvideo = idle;
-        tvideo.volume = 1;
+        tvideo.volume = videoVolume;
         tvideo.playbackRate = 1;
         showClip(next);
         if (tvideo.paused) tvideo.play().catch(() => {});
@@ -958,6 +1048,7 @@ $("export").onclick = async () => {
     if (!clips.length) throw new Error("Add a clip to the timeline first.");
     await post("/api/export", {clips: clips.map(({id, input, start, end, state: {sliders: t}}) =>
       ({id, input, start, end, denoise: +t.denoise || 0, grain: +t.grain || 0, grain_size: +t.grainsize || 2})),
+                               audio: audio.map(({path, at, volume}) => ({path, at, volume})), volume: videoVolume,
                                name: $("export-name").value, hd: $("export-size").value === "hd"});
     pollExport();
   } catch (e) { fail($("export-status"), e); }
@@ -974,7 +1065,7 @@ function snapshot() {
   return s;
 }
 function persist() {
-  const s = {...snapshot(), mode: viewer.dataset.mode, split: viewer.style.getPropertyValue("--split"), app: {}, clips, selected};
+  const s = {...snapshot(), mode: viewer.dataset.mode, split: viewer.style.getPropertyValue("--split"), app: {}, clips, selected, audio, videoVolume};
   for (const id of APP_TEXT) s.app[id] = $(id).value;
   try { localStorage.setItem("grade", JSON.stringify(s)); } catch {}
 }
@@ -999,6 +1090,7 @@ async function restore(s) {
   if (s.split) viewer.style.setProperty("--split", s.split);
   for (const id of APP_TEXT) if (id in (s.app || s.text)) $(id).value = (s.app || s.text)[id];
   clips = s.clips || []; selected = s.selected || null;
+  audio = s.audio || []; videoVolume = s.videoVolume ?? 1;
   drawClips();
   await restore(s);
 })();

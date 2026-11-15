@@ -167,9 +167,41 @@ def bake(p):
     return cid
 
 
-def timeline_files(inputs):
-    """Let the page play the timeline's clips: for each input, the number of its /video/t<n>, or None
-    for one a browser cannot be handed (a web link, a still, a missing file)."""
+def audio_length(path):
+    """Seconds of sound in a file that is to become an audio track."""
+    path = Path(path).expanduser()
+    if not path.is_file():
+        raise RuntimeError(f"File not found: {path}")
+    found = run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
+                 "stream=codec_type:format=duration", "-of", "csv=p=0", str(path)]).decode().split()
+    if "audio" not in found:
+        raise RuntimeError("There is no sound in that file")
+    return float(found[-1])
+
+
+def mix(joined, out, tracks, volume):
+    """Copy the joined video to `out`, its own sound at `volume`, with the audio tracks mixed in.
+
+    A track starts `at` seconds into the timeline; a negative `at` skips that much of its start.
+    """
+    level = lambda v: min(1, max(0, float(v)))
+    cmd, graph = ["ffmpeg", "-v", "error", "-y", "-i", joined], [f"[0:a]volume={level(volume)}[a0]"]
+    for n, t in enumerate(tracks, 1):
+        at = float(t["at"])
+        cmd += [*(["-ss", str(-at)] if at < 0 else []), "-i", str(Path(t["path"]).expanduser())]
+        delay = f"adelay={round(at * 1000)}:all=1," if at > 0 else ""
+        graph.append(f"[{n}:a:0]aformat=sample_rates=48000:channel_layouts=stereo,{delay}volume={level(t['volume'])}[a{n}]")
+    # as long as the video; levels as set, with a limiter in case the sum would clip
+    graph.append("".join(f"[a{n}]" for n in range(len(tracks) + 1))
+                 + f"amix=inputs={len(tracks) + 1}:duration=first:normalize=0,alimiter=limit=0.95:level=0[a]")
+    run([*cmd, "-filter_complex", ";".join(graph), "-map", "0:v:0", "-map", "[a]", "-c:v", "copy", "-tag:v", "hvc1",
+         "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", str(out)], timeout=None)
+
+
+def timeline_files(inputs, audio):
+    """Let the page play the timeline: for each clip input, the number of its /video/t<n>, or None
+    for one a browser cannot be handed (a web link, a still, a missing file); and for each audio
+    track's file, the number of its /video/a<n>, or None if it is missing."""
     paths, keys = [], []
     for inp in inputs:
         try:
@@ -185,7 +217,9 @@ def timeline_files(inputs):
     for k in [k for k in playable if k != "source"]:
         del playable[k]
     playable.update({f"t{n}": path for n, path in enumerate(paths)})
-    return keys
+    sounds = [str(Path(a).expanduser()) for a in audio]
+    playable.update({f"a{n}": path for n, path in enumerate(sounds) if Path(path).is_file()})
+    return {"files": keys, "audio": [n if f"a{n}" in playable else None for n in range(len(sounds))]}
 
 
 def texture(c, h):
@@ -264,10 +298,11 @@ def encode(cmd, done, span, total):
         raise RuntimeError(err[-1] if err else f"{Path(cmd[0]).name} failed")
 
 
-def run_export(clips, name, hd):
+def run_export(clips, name, hd, tracks=(), volume=1):
     """Render each clip through its LUT to matching 10-bit HEVC files, then join them.
 
     A clip may also ask for denoise (before the LUT) and film grain (after it), each 0 to 1.
+    `tracks` are audio files mixed in over the whole timeline; `volume` is for the clips' own sound.
     """
     ffmpeg = ["ffmpeg", "-v", "error", "-y", "-nostats", "-progress", "pipe:1"]
     # every part gets the same time base, or parts made by different engines join with wrong timing
@@ -339,13 +374,17 @@ def run_export(clips, name, hd):
             while out.exists():  # never overwrite an earlier export
                 n += 1
                 out = EXPORT_DIR / f"{name} {n}.mp4"
-            if len(parts) == 1:
-                Path(parts[0]).rename(out)
-            else:
-                export["text"] = "Joining clips"
+            joined = parts[0]
+            if len(parts) > 1:
+                export["text"], joined = "Joining clips", f"{tmp}/joined.mp4"
                 Path(tmp, "list.txt").write_text("".join(f"file '{p}'\n" for p in parts))
                 run(["ffmpeg", "-v", "error", "-f", "concat", "-safe", "0", "-i", f"{tmp}/list.txt",
-                     "-c", "copy", "-movflags", "+faststart", str(out)], timeout=None)
+                     "-c", "copy", "-movflags", "+faststart", joined], timeout=None)
+            if tracks or float(volume) != 1:
+                export["text"] = "Mixing audio"
+                mix(joined, out, tracks, volume)
+            else:
+                Path(joined).rename(out)
         export.update(state="done", progress=1, text=str(out))
     except Exception as e:
         export.update(state="error", text="Cancelled" if job.get("cancel") else str(e))
@@ -353,7 +392,7 @@ def run_export(clips, name, hd):
 
 def pick_file(lut=False):
     choose = ('choose file with prompt "Choose a .cube LUT" default location POSIX file "%s"'
-              % LUT_DIR.parent) if lut else 'choose file with prompt "Choose a video or image"'
+              % LUT_DIR.parent) if lut else 'choose file with prompt "Choose a video, image or audio file"'
     r = subprocess.run(["osascript", "-e", "tell me to activate", "-e", f"POSIX path of ({choose})"],
                        capture_output=True, timeout=600)
     return r.stdout.decode().strip()  # empty if cancelled
@@ -411,7 +450,7 @@ class Handler(BaseHTTPRequestHandler):
         elif re.fullmatch(rf"/clip/{CLIP_ID}\.lut", path) and (CLIP_DIR / path[6:]).with_suffix(".cube").is_file():
             rows = grade.read_cube((CLIP_DIR / path[6:]).with_suffix(".cube")).transpose(2, 1, 0, 3)  # as /api/cube
             self.send(rows.astype("<f4").tobytes(), "application/octet-stream")
-        elif re.fullmatch(r"/video/(source|t\d+)", path) and playable.get(path[7:]):
+        elif re.fullmatch(r"/video/(source|[ta]\d+)", path) and playable.get(path[7:]):
             self.send_video(playable[path[7:]])
         else:
             self.send({"error": "not found"}, code=404)
@@ -448,7 +487,9 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/api/clip":
                 self.send({"id": bake(p)})
             elif self.path == "/api/timeline":
-                self.send({"files": timeline_files(p["inputs"])})
+                self.send(timeline_files(p["inputs"], p.get("audio", ())))
+            elif self.path == "/api/audio":
+                self.send({"length": audio_length(p["path"].strip())})
             elif self.path == "/api/closeup":
                 self.send(closeup(p))
             elif self.path == "/api/clip/remove":
@@ -462,7 +503,7 @@ class Handler(BaseHTTPRequestHandler):
                 name = re.sub(r"[^\w\- ]", "", p["name"]).strip() or "video"
                 job.clear()
                 export.update(state="running", progress=0, text="Starting")
-                threading.Thread(target=run_export, args=(p["clips"], name, p.get("hd", False)),
+                threading.Thread(target=run_export, args=(p["clips"], name, p.get("hd", False), p.get("audio", ()), p.get("volume", 1)),
                                  daemon=True).start()
                 self.send(export)
             elif self.path == "/api/export/cancel":
