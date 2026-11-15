@@ -38,6 +38,7 @@ stats = {}    # same keys -> grade.stats() of that frame
 streams = {}  # video URL -> (direct stream URL, duration)
 playable = {}  # "source" -> the local video file the page may play, if there is one
 export = {"state": "idle", "progress": 0, "text": ""}  # the one export job: idle / running / done / error
+closeups = {}  # "before" / "after" -> PNG of the last close-up
 job = {}      # "proc": the ffmpeg now running; "cancel": set once the user asks to stop
 
 
@@ -142,6 +143,15 @@ def jpeg(rgb):
 
 # ---------- timeline clips and export ----------
 
+def write_grade(path, p, fn):
+    """Write the grade `fn` as the one LUT a video render uses, with the input LUT folded in."""
+    input_lut, size = p.get("input_lut", "").strip(), grade.LUT_SIZE
+    if input_lut:  # one finer LUT instead of two chained ones: each LUT costs render time
+        lut, graded, size = grade.read_cube(Path(input_lut).expanduser()), fn, 64  # the GPU exporter's limit
+        fn = lambda rgb: graded(grade.apply_lut(rgb, lut))
+    grade.write_cube(path, fn, size)
+
+
 def bake(p):
     """Freeze the current grade as a timeline clip: one LUT (input LUT folded in) and a thumbnail."""
     cid = p.get("id") or uuid.uuid4().hex[:8]
@@ -149,16 +159,55 @@ def bake(p):
         raise RuntimeError("Bad clip id")
     if "source" not in frames:
         raise RuntimeError("Load a video first")
-    fn, size = transform(p), grade.LUT_SIZE
+    fn = transform(p)
     thumb = grade.apply_lut(frames["source"][::4, ::4], grade.as_grid(grade.build_lut(fn)))
-    input_lut = p.get("input_lut", "").strip()
-    if input_lut:  # one finer LUT instead of two chained ones: each LUT costs render time
-        lut, graded, size = grade.read_cube(Path(input_lut).expanduser()), fn, 64  # the GPU exporter's limit
-        fn = lambda rgb: graded(grade.apply_lut(rgb, lut))
     CLIP_DIR.mkdir(exist_ok=True)
-    grade.write_cube(CLIP_DIR / f"{cid}.cube", fn, size)
+    write_grade(CLIP_DIR / f"{cid}.cube", p, fn)
     (CLIP_DIR / f"{cid}.jpg").write_bytes(jpeg(thumb))
     return cid
+
+
+def texture(c, h):
+    """A clip's denoise and grain strengths (0 to 1) and its grain size in pixels of an h-pixel-high picture."""
+    denoise, grain = (min(1, max(0, float(c.get(k, 0)))) for k in ("denoise", "grain"))
+    return denoise, grain, min(8, max(1, float(c.get("grain_size", 2)))) * h / 1080  # grain size is set for 1080p
+
+
+def closeup(p):
+    """One spot of one frame at full size, rendered by the GPU exporter with and without denoise."""
+    tool, src = gpu_tool(), resolve_input(p["input"])[0]
+    if not tool:
+        raise RuntimeError("The close-up needs the GPU exporter (install the Xcode Command Line Tools)")
+    w, h, fps, _ = probe(src)
+    denoise, grain, size = texture(p, h)
+    cw, ch = min(w, int(p["width"])), min(h, int(p["height"]))
+    x, y = (round(min(max(float(p[k]) * full - part / 2, 0), full - part)) for k, full, part in (("x", w, cw), ("y", h, ch)))
+    with tempfile.TemporaryDirectory() as tmp:
+        write_grade(f"{tmp}/lut.cube", p, transform(p))
+
+        failed = []
+
+        def shot(name, denoise):  # three frames: the one shown, and the two after it that denoise compares it with
+            try:
+                render(name, denoise)
+            except (RuntimeError, subprocess.TimeoutExpired) as e:
+                failed.append(str(e))
+
+        def render(name, denoise):
+            run([tool, src, str(p["time"]), str(float(3 / Fraction(fps))), f"{tmp}/lut.cube", f"{tmp}/{name}.mov",
+                 str(w), str(h), str(denoise), str(grain), str(size)])
+            closeups[name] = run(["ffmpeg", "-v", "error", "-i", f"{tmp}/{name}.mov", "-frames:v", "1",
+                                  "-vf", f"crop={cw}:{ch}:{x}:{y}", "-f", "image2pipe", "-c:v", "png", "-"])
+
+        both = [threading.Thread(target=shot, args=a) for a in (("before", 0), ("after", denoise))]
+        closeups.clear()
+        for t in both:
+            t.start()
+        for t in both:
+            t.join()
+        if failed:
+            raise RuntimeError(f"No close-up of this frame: {failed[0]}")
+    return {"x": (x + cw / 2) / w, "y": (y + ch / 2) / h, "width": cw, "frame": [w, h]}
 
 
 def probe(src):
@@ -195,7 +244,10 @@ def encode(cmd, done, span, total):
 
 
 def run_export(clips, name, hd):
-    """Render each clip through its LUT to matching 10-bit HEVC files, then join them."""
+    """Render each clip through its LUT to matching 10-bit HEVC files, then join them.
+
+    A clip may also ask for denoise (before the LUT) and film grain (after it), each 0 to 1.
+    """
     ffmpeg = ["ffmpeg", "-v", "error", "-y", "-nostats", "-progress", "pipe:1"]
     # every part gets the same time base, or parts made by different engines join with wrong timing
     hevc = ["-tag:v", "hvc1", "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709",
@@ -223,17 +275,23 @@ def run_export(clips, name, hd):
                         raise RuntimeError("Cancelled")
                     export["text"] = f"Rendering clip {i + 1} of {len(clips)}"
                     cut = ["-ss", str(c["start"]), "-t", str(span), "-i", src]
+                    denoise, grain, size = texture(c, h)
                     # second input: the clip's audio, or silence, as every part needs an audio track to join
                     audio = cut if sound else ["-f", "lavfi", "-t", str(span), "-i", "anullsrc=r=48000:cl=stereo"]
                     if gpu:
-                        encode([tool, src, str(c["start"]), str(span), lut, f"{tmp}/video.mov", str(w), str(h)],
-                               done, span, total)
+                        encode([tool, src, str(c["start"]), str(span), lut, f"{tmp}/video.mov", str(w), str(h),
+                                str(denoise), str(grain), str(size)], done, span, total)
                         encode([*ffmpeg, "-i", f"{tmp}/video.mov", *audio, "-map", "0:v:0", "-map", "1:a:0",
                                 "-c:v", "copy", *hevc, *aac, f"{tmp}/{i}.mp4"], done + span, 0, total)
                     else:
+                        # stand-ins for the GPU exporter's denoise and grain, tuned to about the same strength
+                        clean = f"hqdn3d={6 * denoise}:{4.5 * denoise}:{9 * denoise}:{6.75 * denoise}," if denoise else ""
+                        grains = (f"[p];color=gray:s={round(w / size)}x{round(h / size)}:r={fps},format=gray,"
+                                  f"noise=alls={round(35 * grain)}:allf=t,format=gray10le,scale={w}:{h}:flags=bilinear,"
+                                  "format=gbrp10le[g];[p][g]blend=all_mode=softlight:shortest=1") if grain else ""
                         encode([*ffmpeg, "-hwaccel", "videotoolbox", *cut, *audio, "-map", "0:v:0", "-map", "1:a:0",
-                                "-vf", f"scale={w}:{h}:force_original_aspect_ratio=decrease,setsar=1,fps={fps},"
-                                f"format=gbrp10le,lut3d=file='{lut}',pad={w}:{h}:-1:-1,"
+                                "-vf", f"{clean}scale={w}:{h}:force_original_aspect_ratio=decrease,setsar=1,fps={fps},"
+                                f"format=gbrp10le,lut3d=file='{lut}',pad={w}:{h}:-1:-1{grains},"
                                 "scale=out_color_matrix=bt709:out_range=tv,format=p010le",
                                 "-c:v", "hevc_videotoolbox", "-q:v", "55", *hevc, *aac, f"{tmp}/{i}.mp4"],
                                done, span, total)
@@ -327,6 +385,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send((CLIP_DIR / path[6:]).read_bytes(), "image/jpeg")
         elif path == "/api/export":
             self.send(export)
+        elif path in ("/closeup/before.png", "/closeup/after.png") and path[9:-4] in closeups:
+            self.send(closeups[path[9:-4]], "image/png")
         elif path == "/video/source" and playable.get("source"):
             self.send_video(playable["source"])
         else:
@@ -363,6 +423,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send({"path": str(LUT_DIR / f"{name}.cube")})
             elif self.path == "/api/clip":
                 self.send({"id": bake(p)})
+            elif self.path == "/api/closeup":
+                self.send(closeup(p))
             elif self.path == "/api/clip/remove":
                 if re.fullmatch(CLIP_ID, p["id"]):
                     for ext in ("cube", "jpg"):

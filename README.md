@@ -54,7 +54,10 @@ skip Resolve altogether.
 2. **Reference**: paste a YouTube link or file path and pick the frame whose look you want.
 3. **Match**: two strengths, one for brightness/contrast and one for colour.
 4. **Look**: exposure, contrast, fade, saturation, temperature, tint, and shadow/highlight tints,
-   applied after the match.
+   applied after the match. **Texture** adds denoise and film grain to exported video; a saved
+   LUT cannot carry them. Grain shows in the preview. To judge denoise, switch the preview to
+   **Close-up**: it shows one spot of the current frame at full size, rendered by the exporter
+   with and without denoise (about 1.6 s per update on the 4K test clip). Drag to look elsewhere.
 5. **Cut and assemble** (optional): drag the In and Out markers on the scrub bar under the
    preview (or press I / O, use the Set buttons, or type a time such as `1:02.5`; Zoom + makes
    the bar cover less time for fine cuts), then click **Add clip**. Each clip keeps its
@@ -111,6 +114,7 @@ All work is done in Oklab, on display-referred (Rec.709/sRGB) pixel values.
 | `POST /api/clip`, `/api/clip/remove` | Bakes the current grade into `clips/<id>.cube` plus a thumbnail, or deletes them. |
 | `POST /api/export`, `/api/export/cancel` | Starts or stops the one background export. |
 | `GET /api/export` | Export state and progress; the page polls it every second. |
+| `POST /api/closeup`, `GET /closeup/before.png`, `/closeup/after.png` | Renders three frames at the playhead with the GPU exporter, with and without denoise, and serves a full-size crop of each. |
 | `GET /video/source` | The current local source file, with byte ranges, for the page's player. |
 | `POST /api/lut`, `/api/cube` | The grade, or an input LUT file, as raw float32 rows for the player's shader. |
 
@@ -127,6 +131,14 @@ All work is done in Oklab, on display-referred (Rec.709/sRGB) pixel values.
   each frame through the input LUT and the grade LUT (3D textures), so playback needs no
   server work. The stills from `/api/frame` remain for the histogram, and take over the
   viewer when the browser cannot play the file (web links, stills, unsupported codecs).
+- **Denoise** (`lutexport.swift`): each pixel is averaged with the same pixel in the two frames
+  before and after, weighted by how alike they are, so moving things are left alone. It runs
+  before the LUT and costs no measurable render time. On the test clip's shaded sleeve it cut
+  fine noise by about 13% at full strength. (Apple's own temporal noise filter reports itself
+  unsupported on the M2 Max.)
+- **Grain**: grey noise, new on every frame, added after the grade in proportion to l(1 − l), so
+  mid-tones get the most and black and white none. Grain size is set for a 1080p picture and
+  scales with the output. The same formula runs in the player's shader.
 - **Clips**: the timeline lives in the page (`localStorage`); the server only holds each
   clip's baked LUT. With an input LUT, both are folded into one 64³ LUT (the GPU exporter's
   limit), because every LUT pass costs render time.
@@ -136,7 +148,9 @@ All work is done in Oklab, on display-referred (Rec.709/sRGB) pixel values.
   cannot read one of the files, or any clip's frame rate differs from the first clip's. The
   engines are never mixed in one export: Apple's players cannot decode a file joined from
   parts made by both. Both paths were checked to
-  cut on the same frames and give the same colours. The first clip sets the size and frame
+  cut on the same frames and give the same colours. For denoise and grain the ffmpeg path uses
+  stand-ins (`hqdn3d`, and `noise` with a soft-light blend) tuned to a similar strength, not
+  identical: its denoise also softens a little, and its grain is weaker in dark areas. The first clip sets the size and frame
   rate; other clips are scaled and padded to fit. Silent clips get a silent audio track.
 - **Safety**: binds to localhost only and accepts POSTs only with a JSON content type, so
   other websites cannot drive it.
@@ -160,8 +174,11 @@ All work is done in Oklab, on display-referred (Rec.709/sRGB) pixel values.
 
 ## Known limits
 
-- **A LUT only remaps colours pixel by pixel.** No noise reduction, sharpening, windows or
-  tracking; those stay manual in Resolve.
+- **A LUT only remaps colours pixel by pixel.** Denoise and grain exist only in exported video;
+  sharpening, windows and tracking stay manual in Resolve.
+- **Grain makes files much larger** (it cannot be compressed away), and the encoder softens fine
+  grain: below about 50% at size 1 little survives. Denoise can smooth faint real texture
+  that barely moves.
 - **Editing is cuts only.** No transitions, titles, audio levels or music, and no playback
   of the assembled timeline (only of the clip being cut). Cut points snap to 0.1 s.
 - **Matching is statistical.** It works when the two shots have broadly similar content. With
@@ -186,6 +203,14 @@ All work is done in Oklab, on display-referred (Rec.709/sRGB) pixel values.
 - **Apple playback**: every test export was decoded start to finish with AVFoundation, the
   engine QuickTime uses. QuickTime Player itself was not driven (it did not answer AppleScript).
 
+- **Denoise and grain**: a three-clip 4K export (denoised, grainy, plain) on each engine. The
+  plain clip matched the original's noise level, the denoised one was lower and the grainy one
+  higher; grain left mean brightness unchanged and was colourless on a grey ramp.
+
+- **Close-up**: rendered at two spots of the 4K test clip in the browser; the two sides
+  differed with denoise on and the note said so with it off. It needs the GPU exporter and a
+  local file (not a web link).
+
 ## Not yet verified
 
 - The player in Safari and Chrome. It was tested in one Chromium-based browser; it needs
@@ -198,7 +223,7 @@ All work is done in Oklab, on display-referred (Rec.709/sRGB) pixel values.
 ## Ideas not built
 
 - Play the assembled timeline in the page before exporting.
-- Crossfades, and a noise-reduction option at export.
+- Crossfades.
 
 - Type a timestamp, or honour `?t=` in YouTube links, instead of dragging the slider.
 - A shadow-desaturation slider to make shadow colour noise less visible.

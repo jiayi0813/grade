@@ -104,6 +104,11 @@
   .empty { position:absolute; inset:0; display:grid; place-content:center; text-align:center; gap:4px; color:var(--dim); }
   .empty b { color:var(--text); font-weight:600; font-size:14px; }
   .viewer.ready .empty { display:none; }
+  .close { position:absolute; inset:0; display:none; grid-template-columns:1fr 1fr; gap:2px; background:var(--line); cursor:grab; touch-action:none; }
+  .viewer.ready[data-mode=closeup] .close { display:grid; }
+  .close div { position:relative; overflow:hidden; background:#0b0b0b; }
+  .viewer .close img { display:block; inset:auto; left:50%; top:50%; height:auto; max-width:none; translate:calc(-50% + var(--dx, 0px)) calc(-50% + var(--dy, 0px)); }
+  .close span { position:absolute; top:10px; left:10px; padding:2px 8px; border-radius:5px; background:#000a; color:#eee; font-size:11px; pointer-events:none; }
 
   /* ---- player controls and scrub bar */
   .transport { flex:none; display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
@@ -207,6 +212,7 @@
         <h3>Colour</h3><div id="g-colour"></div>
         <h3>Shadows tint</h3><div id="g-shadows"></div>
         <h3>Highlights tint</h3><div id="g-highlights"></div>
+        <h3 title="For exported video only: a LUT cannot carry denoise or grain.">Texture</h3><div id="g-texture"></div>
       </section>
     </div>
     <footer>
@@ -219,13 +225,14 @@
     <div class="bar">
       <span class="title">Preview</span><span class="note" id="viewer-note"></span>
       <div class="seg" role="group" aria-label="Preview mode">
-        <button data-mode="split" aria-pressed="true">Split</button><button data-mode="graded" aria-pressed="false">Graded</button><button data-mode="original" aria-pressed="false">Original</button>
+        <button data-mode="split" aria-pressed="true">Split</button><button data-mode="graded" aria-pressed="false">Graded</button><button data-mode="original" aria-pressed="false">Original</button><button data-mode="closeup" aria-pressed="false" title="One spot at full size, as the export will render it, with and without denoise">Close-up</button>
       </div>
     </div>
     <div class="viewer" id="viewer" data-mode="split">
       <img id="graded" alt="Graded frame"><img id="orig" alt="Original frame">
       <video id="video" playsinline preload="auto"></video><canvas id="stage" aria-label="Video preview"></canvas>
       <div class="handle"></div><span class="tag l">Original</span><span class="tag r">Graded</span>
+      <div class="close" id="closeup"><div><img id="close-before" alt="Close-up without denoise"><span>Without denoise</span></div><div><img id="close-after" alt="Close-up with denoise"><span>With denoise</span></div></div>
       <div class="empty"><b>Load a video to start</b><span>Paste a path or click Browse in step 1.</span></div>
     </div>
     <div class="transport">
@@ -284,6 +291,9 @@ const SLIDERS = [
   ["shadows", "sb", "Blue – yellow", -0.05, 0.05, 0.001, 0, tint, "blue-yellow"],
   ["highlights", "ha", "Green – magenta", -0.05, 0.05, 0.001, 0, tint, "green-magenta"],
   ["highlights", "hb", "Blue – yellow", -0.05, 0.05, 0.001, 0, tint, "blue-yellow"],
+  ["texture", "denoise", "Denoise (seen in the export only)", 0, 1, 0.05, 0, pct],
+  ["texture", "grain", "Film grain", 0, 1, 0.05, 0, pct],
+  ["texture", "grainsize", "Grain size", 1, 4, 0.5, 2, v => v.toFixed(1)],
 ];
 const shows = {};
 for (const [group, key, label, min, max, step, def, fmt, track] of SLIDERS) {
@@ -298,7 +308,7 @@ for (const [group, key, label, min, max, step, def, fmt, track] of SLIDERS) {
     el.querySelector(".val").textContent = fmt(+input.value);
     el.classList.toggle("changed", +input.value !== def);
   };
-  input.addEventListener("input", () => { shows[key](); preview(); persist(); });
+  input.addEventListener("input", () => { shows[key](); if (group === "texture") { draw(); closeSoon(); } else preview(); persist(); });
   input.addEventListener("dblclick", () => { input.value = def; input.dispatchEvent(new Event("input")); });
   shows[key]();
 }
@@ -320,6 +330,7 @@ const setMode = mode => {
   for (const b of document.querySelectorAll(".seg button")) b.setAttribute("aria-pressed", b.dataset.mode === mode);
   $("viewer-note").textContent = mode === "split" ? "Drag across the image to compare" : "";
   draw();
+  closeup();
 };
 for (const b of document.querySelectorAll(".seg button")) b.onclick = () => { setMode(b.dataset.mode); persist(); };
 const drag = e => {
@@ -347,7 +358,7 @@ async function preview() {
     viewer.classList.add("ready");
   } catch (e) { $("source-status").className = "status err"; $("source-status").textContent = e.message; }
   busy = false;
-  if (again) { again = false; preview(); }
+  if (again) { again = false; preview(); } else closeSoon();
 }
 
 // ---- brightness histogram of graded / reference / original
@@ -406,16 +417,27 @@ if (gl) {
     void main() { uv = vec2(p.x, 1. - p.y); gl_Position = vec4(p * 2. - 1., 0, 1); }`));
   gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, `#version 300 es
     precision highp float; precision highp sampler3D;
-    uniform sampler2D frame; uniform sampler3D lut1, lut2; uniform float n1, n2, split;
+    uniform sampler2D frame; uniform sampler3D lut1, lut2; uniform float n1, n2, split, grain, cell, seed;
     in vec2 uv; out vec4 colour;
     vec3 look(sampler3D lut, float n, vec3 c) { return texture(lut, (clamp(c, 0., 1.) * (n - 1.) + .5) / n).rgb; }
+    float hash(vec2 p) { vec3 q = fract(vec3(p.xyx) * .1031 + seed); q += dot(q, q.yzx + 33.33); return fract((q.x + q.y) * q.z); }
+    float speck(vec2 p) { return hash(p) + hash(p + 71.) + hash(p + 157.) + hash(p + 293.) - 2.; }
     void main() {
       vec3 c = look(lut1, n1, texture(frame, uv).rgb);        // "original" is the video after its input LUT
-      colour = vec4(uv.x < split ? c : look(lut2, n2, c), 1);
+      if (uv.x >= split) {
+        c = look(lut2, n2, c);
+        if (grain > 0.) {  // as in lutexport.swift: grey noise, most in the mid-tones, none in black or white
+          vec2 p = gl_FragCoord.xy / cell, i = floor(p), f = p - i;
+          float n = mix(mix(speck(i), speck(i + vec2(1, 0)), f.x), mix(speck(i + vec2(0, 1)), speck(i + 1.), f.x), f.y);
+          float l = clamp(dot(c, vec3(.2126, .7152, .0722)), 0., 1.);
+          c += n * grain * .1 * 4. * l * (1. - l);
+        }
+      }
+      colour = vec4(c, 1);
     }`));
   gl.linkProgram(prog);
   gl.useProgram(prog);
-  for (const name of ["frame", "lut1", "lut2", "n1", "n2", "split"]) uniform[name] = gl.getUniformLocation(prog, name);
+  for (const name of ["frame", "lut1", "lut2", "n1", "n2", "split", "grain", "cell", "seed"]) uniform[name] = gl.getUniformLocation(prog, name);
   gl.uniform1i(uniform.lut1, 1);
   gl.uniform1i(uniform.lut2, 2);
   gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
@@ -440,6 +462,9 @@ function draw() {
     split = (parseFloat(viewer.style.getPropertyValue("--split") || "50") / 100 * r.width - (r.width - shown) / 2) / shown;
   }
   gl.uniform1f(uniform.split, split);
+  gl.uniform1f(uniform.grain, v("grain"));
+  gl.uniform1f(uniform.cell, v("grainsize") * h / 1080);  // grain size is set for a 1080p picture
+  gl.uniform1f(uniform.seed, Math.random());              // new grain on every frame
   gl.activeTexture(gl.TEXTURE0);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -522,7 +547,7 @@ function seek(t) {
   if (video.seeking) wanted = head; else video.currentTime = head;
 }
 // without a playable video the only picture is the server's still, so fetch the one at the playhead
-const settle = () => { if (!inVideo() && loaded) { $("source-time").value = head; inputs.source.label(); inputs.source.load(); } };
+const settle = () => { closeSoon(); if (!inVideo() && loaded) { $("source-time").value = head; inputs.source.label(); inputs.source.load(); } };
 const showCut = () => {
   $("cut-in").value = stamp(cut[0]); $("cut-out").value = stamp(cut[1]);
   scrub.style.setProperty("--in", place(cut[0])); scrub.style.setProperty("--out", place(cut[1]));
@@ -646,6 +671,48 @@ $("save").onclick = async () => {
 };
 for (const id of ["lut-name", "export-name", "export-size"]) $(id).addEventListener("change", () => persist());
 
+// ---- close-up: one spot of the frame at the playhead at full size, rendered by the real
+// exporter with and without denoise. Drag to move the spot.
+let spot = [0.5, 0.5], frameSize = [1, 1], closeTimer = 0, closeBusy = false, closeAgain = false;
+async function closeup() {
+  if (viewer.dataset.mode !== "closeup" || !loaded) return;
+  if (closeBusy) { closeAgain = true; return; }
+  closeBusy = true;
+  const r = $("closeup").getBoundingClientRect(), note = $("viewer-note");
+  note.textContent = "Rendering the close-up…";
+  try {
+    const got = await (await post("/api/closeup", {...params(), input_lut: $("input-lut").value, input: $("source-input").value.trim(),
+      time: head, x: spot[0], y: spot[1], width: Math.round(r.width / 2 * devicePixelRatio), height: Math.round(r.height * devicePixelRatio),
+      denoise: v("denoise"), grain: v("grain"), grain_size: v("grainsize")})).json();
+    spot = [got.x, got.y]; frameSize = got.frame;
+    await Promise.all(["before", "after"].map(k => new Promise(done => {
+      const img = $("close-" + k);
+      img.onload = img.onerror = done;
+      img.style.width = got.width / devicePixelRatio + "px";  // one video pixel per screen pixel
+      img.src = `/closeup/${k}.png?${Date.now()}`;
+    })));
+    $("closeup").style.cssText = "";
+    note.textContent = "Full size, as exported · drag to look elsewhere" + (v("denoise") ? "" : " · Denoise is off, so both sides match");
+  } catch (e) { note.textContent = e.message; }
+  closeBusy = false;
+  if (closeAgain) { closeAgain = false; closeup(); }
+}
+function closeSoon() { clearTimeout(closeTimer); closeTimer = setTimeout(closeup, 250); }
+$("closeup").onpointerdown = e => {
+  const pane = $("closeup"), from = [e.clientX, e.clientY];
+  let moved = [0, 0];
+  pane.setPointerCapture(e.pointerId);
+  pane.onpointermove = m => {
+    moved = [m.clientX - from[0], m.clientY - from[1]];
+    pane.style.setProperty("--dx", moved[0] + "px"); pane.style.setProperty("--dy", moved[1] + "px");
+  };
+  pane.onpointerup = () => {
+    pane.onpointermove = pane.onpointerup = null;
+    spot = spot.map((at, i) => at - moved[i] * devicePixelRatio / frameSize[i]);
+    closeup();
+  };
+};
+
 // ---- timeline: each clip keeps its own cut, grade (baked to a LUT by the server) and settings
 let clips = [], selected = null;
 const fail = (el, e) => { el.className = "status err"; el.textContent = e.message; };
@@ -705,7 +772,8 @@ $("export").onclick = async () => {
   try {
     if ($("export").textContent === "Cancel") return await post("/api/export/cancel", {});
     if (!clips.length) throw new Error("Add a clip to the timeline first.");
-    await post("/api/export", {clips: clips.map(({id, input, start, end}) => ({id, input, start, end})),
+    await post("/api/export", {clips: clips.map(({id, input, start, end, state: {sliders: t}}) =>
+      ({id, input, start, end, denoise: +t.denoise || 0, grain: +t.grain || 0, grain_size: +t.grainsize || 2})),
                                name: $("export-name").value, hd: $("export-size").value === "hd"});
     pollExport();
   } catch (e) { fail($("export-status"), e); }

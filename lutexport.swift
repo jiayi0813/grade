@@ -1,8 +1,10 @@
 // GPU video export for app.py: applies a .cube LUT to a stretch of video and encodes it as
 // 10-bit HEVC, with decoding, the LUT and encoding all on Apple hardware. Video only; app.py
-// adds the audio with ffmpeg. Built on demand by app.py:
+// adds the audio with ffmpeg. Optionally removes noise before the LUT and adds film grain after
+// it. Built on demand by app.py:
 //   swiftc -O -swift-version 5 lutexport.swift -o lutexport
-//   lutexport input start duration lut.cube output.mov width height
+//   lutexport input start duration lut.cube output.mov width height denoise grain grain-size
+// denoise and grain are strengths from 0 (off) to 1; grain-size is in output pixels.
 import AVFoundation
 import CoreImage
 import VideoToolbox
@@ -10,8 +12,9 @@ import VideoToolbox
 func fail(_ msg: String) -> Never { FileHandle.standardError.write((msg + "\n").data(using: .utf8)!); exit(1) }
 
 let a = CommandLine.arguments
-guard a.count == 8, let start = Double(a[2]), let length = Double(a[3]), let w = Int(a[6]), let h = Int(a[7])
-else { fail("usage: lutexport input start duration lut.cube output.mov width height") }
+guard a.count == 11, let start = Double(a[2]), let length = Double(a[3]), let w = Int(a[6]), let h = Int(a[7]),
+      let denoise = Double(a[8]), let grain = Double(a[9]), let grainSize = Double(a[10]), grainSize > 0
+else { fail("usage: lutexport input start duration lut.cube output.mov width height denoise grain grain-size") }
 
 // ---- LUT: .cube rows are RGB with red fastest, which is the order Core Image wants (as RGBA)
 var size = 0
@@ -55,6 +58,31 @@ let canvas = CGRect(x: 0, y: 0, width: w, height: h)
 let black = CIImage(color: .black).cropped(to: canvas)
 let resize = Int(shown.width) != w || Int(shown.height) != h
 
+// ---- denoise: each pixel is averaged with the same pixel in the two frames before and after,
+// but only with those that look alike, so things that move are left alone (no ghosting).
+let calm = CIColorKernel(source: """
+    kernel vec4 calm(__sample c, __sample p, __sample q, __sample r, __sample s, float k) {
+        vec4 sum = c; float n = 1.0; vec3 d; float w;
+        d = p.rgb - c.rgb; w = exp(-dot(d, d) * k); sum += p * w; n += w;
+        d = q.rgb - c.rgb; w = exp(-dot(d, d) * k); sum += q * w; n += w;
+        d = r.rgb - c.rgb; w = exp(-dot(d, d) * k); sum += r * w; n += w;
+        d = s.rgb - c.rgb; w = exp(-dot(d, d) * k); sum += s * w; n += w;
+        return sum / n;
+    }
+    """)!
+let reach = denoise > 0 ? 2 : 0  // neighbouring frames used on each side
+
+// ---- grain: grey noise (four uniform channels summed, so roughly bell-shaped) added to the
+// picture in proportion to l(1 - l): mid-tones get the most, black and white none
+let speckle = CIColorKernel(source: """
+    kernel vec4 speckle(__sample image, __sample noise, float amount) {
+        float l = clamp(dot(image.rgb, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+        float n = noise.r + noise.g + noise.b + noise.a - 2.0;
+        return vec4(image.rgb + n * amount * 4.0 * l * (1.0 - l), image.a);
+    }
+    """)!
+let noise = CIFilter(name: "CIRandomGenerator")!.outputImage!
+
 // ---- writer: hardware HEVC Main 10, tagged Rec.709
 let rec709 = [AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
               AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
@@ -78,21 +106,37 @@ let context = CIContext(options: [.workingColorSpace: none, .outputColorSpace: n
 guard reader.startReading(), writer.startWriting() else { fail("\(reader.error ?? writer.error!)") }
 
 var frames = 0
+var queue = [(CVPixelBuffer, CMTime)](), past = [CVPixelBuffer]()
 // Each frame runs in its own autorelease pool. Without one, frames are never handed back to
 // the decoder, which then fails with "Cannot Decode" after about 77 seconds of video.
 func step() -> Bool {
-    guard let sample = output.copyNextSampleBuffer() else { return false }
-    guard let src = CMSampleBufferGetImageBuffer(sample) else { return true }
-    let time = CMSampleBufferGetPresentationTimeStamp(sample)
+    while queue.count <= reach, let sample = output.copyNextSampleBuffer() {  // the frame plus those the denoiser looks ahead to
+        if let buffer = CMSampleBufferGetImageBuffer(sample) { queue.append((buffer, CMSampleBufferGetPresentationTimeStamp(sample))) }
+    }
+    guard !queue.isEmpty else { return false }
+    let (src, time) = queue.removeFirst()
+    defer { past = Array((past + [src]).suffix(reach)) }
     if time < from || time >= to { return true }  // the same frames ffmpeg's -ss / -t would keep
     if frames == 0 { writer.startSession(atSourceTime: time) }
     while !input.isReadyForMoreMediaData { usleep(500) }
     var made: CVPixelBuffer?
     CVPixelBufferPoolCreatePixelBuffer(nil, adaptor.pixelBufferPool!, &made)
     guard let dst = made else { fail("out of video memory") }
-    filter.setValue(CIImage(cvPixelBuffer: src, options: [.colorSpace: none]).oriented(orientation), forKey: kCIInputImageKey)
+    func picture(_ buffer: CVPixelBuffer) -> CIImage { CIImage(cvPixelBuffer: buffer, options: [.colorSpace: none]) }
+    var frame = picture(src)
+    if denoise > 0 {
+        let t = denoise * 0.05  // how different a neighbour's pixel may be and still count
+        let near = (past + queue.map { $0.0 }).map(picture) + Array(repeating: frame, count: 4)  // short at the ends: itself
+        frame = calm.apply(extent: frame.extent, arguments: [frame, near[0], near[1], near[2], near[3], 1 / (2 * t * t)])!
+    }
+    filter.setValue(frame.oriented(orientation), forKey: kCIInputImageKey)
     var image = filter.outputImage!
     if resize { image = image.transformed(by: fit).composited(over: black) }
+    if grain > 0 {  // a different patch of the noise field for every frame
+        let patch = CGAffineTransform(translationX: -.random(in: 0...4000), y: -.random(in: 0...4000))
+        let grains = noise.transformed(by: patch.concatenating(CGAffineTransform(scaleX: grainSize, y: grainSize)))
+        image = speckle.apply(extent: canvas, arguments: [image, grains, grain * 0.1])!
+    }
     CVBufferSetAttachment(dst, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate)
     context.render(image, to: dst, bounds: canvas, colorSpace: nil)
     filter.setValue(nil, forKey: kCIInputImageKey)
